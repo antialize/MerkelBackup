@@ -1,0 +1,23 @@
+[package]
+
+name = "mbackup"
+version = "0.1.0"
+authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
+
+[[bin]]
+name = "server"
+path = "src/server/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/client/main.rs"
+
+[dependencies]
+log = "0.4.6"
+simple_logger = "1.0.1"
+rusqlite = "0.18.0"
+rust-crypto = "0.2.36"
+hyper = "0.12"
+futures = "0.1"
+tokio = "0.1.12"
+rand = "0.6"
