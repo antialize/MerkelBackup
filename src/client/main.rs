@@ -17,7 +17,7 @@ use std::time::SystemTime;
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
 fn push_chunk(content: &[u8]) -> String {
-    let mut hasher = Blake2b::new(512 / 8);
+    let mut hasher = Blake2b::new(256 / 8);
     //TODO seed with key derived value
     hasher.input(content);
 
@@ -216,7 +216,7 @@ fn derive_secrets(password: &str, root: &mut [u8], key: &mut [u8], seed: &mut [u
     // since it depends on 'random' previous values
     const ITEMS: usize = 1024 * 128;
     const ROUNDS: usize = 16;
-    const W: usize = 64;
+    const W: usize = 32;
     const X: usize = std::mem::size_of::<usize>();
     let mut hasher = Blake2b::new(W);
     let mut data: Vec<u8> = Vec::new();
@@ -248,14 +248,15 @@ fn derive_secrets(password: &str, root: &mut [u8], key: &mut [u8], seed: &mut [u
 fn main() {
     simple_logger::init().expect("Unable to init log");
     info!("Derive secret!!\n");
-    let mut root = [0; 64];
-    let mut seed = [0; 64];
-    let mut key = [0; 64];
-    let mut iv = [0; 64];
+    let mut root = [0; 32];
+    let mut seed = [0; 32];
+    let mut key = [0; 32];
+    let mut iv = [0; 32];
     derive_secrets("hunter2", &mut root, &mut key, &mut seed, &mut iv);
     info!("Derive secret!!\n");
 
     let conn = Connection::open("cache.db").expect("Unable to open hash cache");
+    conn.pragma_update(None, "journal_mode", &"WAL".to_string()).expect("Cannot enable wal");
 
     conn.execute(
         "create table if not exists files (
