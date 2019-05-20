@@ -1,22 +1,80 @@
+extern crate clap;
 extern crate futures;
 extern crate hyper;
 extern crate rand;
 extern crate rusqlite;
+extern crate serde;
 extern crate tokio;
+extern crate toml;
+#[macro_use]
+extern crate log;
+extern crate simple_logger;
+
+use clap::{App, Arg};
 use futures::Stream;
 use futures::{future, Future};
 use hyper::header::CONTENT_LENGTH;
 use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use rusqlite::{params, Connection, NO_PARAMS};
-use std::io::Write;
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-
-const SMALL_SIZE: u64 = 1024 * 128;
+const SMALL_SIZE: usize = 1024 * 128;
 
 type ResponseFuture = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
-type Conn = Arc<Mutex<Connection>>;
+
+#[derive(Deserialize, PartialEq, Debug)]
+enum AccessType {
+    Read,
+    Write,
+    Delete,
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct User {
+    name: String,
+    password: String,
+    access_level: AccessType,
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(remote = "log::LevelFilter")]
+pub enum LevelFilterDef {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(default, deny_unknown_fields)]
+struct Config {
+    #[serde(with = "LevelFilterDef")]
+    verbosity: log::LevelFilter,
+    bind: String,
+    data_dir: String,
+    users: Vec<User>,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            verbosity: log::LevelFilter::Info,
+            bind: "0.0.0.0:3321".to_string(),
+            data_dir: ".".to_string(),
+            users: Vec::new(),
+        }
+    }
+}
+
+struct State {
+    config: Config,
+    conn: Mutex<Connection>,
+}
 
 /** Construct a simple http responce */
 fn http_message_i(
@@ -34,6 +92,11 @@ fn http_message_i(
 /** Construct a simple boxed http responce */
 fn http_message(code: StatusCode, message: &'static str) -> ResponseFuture {
     return Box::new(http_message_i(code, message));
+}
+
+fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Option<ResponseFuture> {
+    //TODO (jakob) check basic auth
+    None
 }
 
 /** Validate that a string is a valid hex encoding of a 256bit hash */
@@ -58,36 +121,21 @@ fn handle_put_chunk(
     bucket: String,
     chunk: String,
     req: Request<Body>,
-    conn: Conn,
+    state: Arc<State>,
 ) -> ResponseFuture {
-    // TODO auth
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Write) {
+        warn!("Unauthorized access for put chunk {}/{}", bucket, chunk);
+        return res;
+    }
+
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
     if !check_hash(chunk.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad chunk");
     }
-    let cl: u64 = {
-        let cl = match req.headers().get(CONTENT_LENGTH) {
-            Some(v) => v,
-            None => return http_message(StatusCode::LENGTH_REQUIRED, "Missing content length"),
-        };
-        let cl = match cl.to_str() {
-            Ok(cl) => cl,
-            Err(_) => return http_message(StatusCode::LENGTH_REQUIRED, "Bad content length"),
-        };
-        match cl.parse() {
-            Ok(cl) => cl,
-            Err(_) => return http_message(StatusCode::LENGTH_REQUIRED, "Bad content length"),
-        }
-    };
-
-    if cl > 1024*1024*1024 {
-        return http_message(StatusCode::BAD_REQUEST, "Too large");
-    }
-
     {
-        let conn = conn.lock().unwrap();
+        let conn = state.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT id FROM chunks WHERE bucket=? AND hash=?")
             .unwrap();
@@ -98,68 +146,76 @@ fn handle_put_chunk(
         }
     }
 
-    if cl < SMALL_SIZE {
-        // Small chunks are stored directly in the db
-        return Box::new(
-            req.into_body()
-                .fold(Vec::new(), |mut acc, chunk| {
-                    acc.extend_from_slice(&*chunk);
-                    futures::future::ok::<_, hyper::Error>(acc)
-                })
-                .and_then(move |v| {
-                    if v.len() != cl as usize {
-                        return http_message_i(StatusCode::LENGTH_REQUIRED, "Bad content length");
+    // Small chunks are stored directly in the db
+    return Box::new(
+        req.into_body()
+            .fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                if acc.len() > 1024*1024*1024 {
+                    //TODO return an error somehow
+                }
+                futures::future::ok::<_, hyper::Error>(acc)
+            })
+            .and_then(move |v| {
+                let len = v.len();
+                if len < SMALL_SIZE {
+                    if let Err(_) = state.conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
+                        params![&bucket, &chunk, v.len() as i64, &v]) {
+                        return http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Insert failed")
                     }
-                    let res = conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
-                        params![&bucket, &chunk, v.len() as i64, &v]);
-                    match res {
-                        Ok(_) => http_message_i(StatusCode::OK, ""),
-                        Err(_) => http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Insert failed")
+                } else {
+                     if let Err(_) = std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)) {
+                        return http_message_i(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Could not create upload folder",
+                        );
                     }
-                }),
-        );
-    } else {
-        let path = format!("data/upload/{}_{}_{}", bucket, chunk, rand::random::<f64>());
-        return Box::new(
-            req.into_body()
-                .fold((0, std::fs::File::create(&path).unwrap()), |sf, chunk| {
-                    let (size, mut file) = sf;
-                    file.write_all(&*chunk).expect("Did we run out of disk space?");
-                    futures::future::ok::<_, hyper::Error>( (size + chunk.len(), file))
-                }).and_then(move | sf| {
-                    let size = sf.0;
-                    drop(sf.1);
-                    if size != cl as usize {
-                        return http_message_i(StatusCode::BAD_REQUEST, "Bad content length");
+                    let temp_path = format!("{}/data/upload/{}/{}_{}", state.config.data_dir, bucket, chunk, rand::random::<u64>());
+                    if let Err(_) = std::fs::write(&temp_path, v) {
+                        return http_message_i(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Write failed",
+                        );
                     }
-                    let res = conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time) VALUES (?, ?, ?, strftime('%s', 'now'))",
-                        params![&bucket, &chunk, size as i64]);
-                    let id = match res {
-                        Ok(id) => id,
-                        Err(_) => return http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Insert failed")
-                    };
-                    match std::fs::rename(&path, format!("data/{}/{}", &bucket, id)) {
-                    Ok(_) => http_message_i(StatusCode::OK, ""),
-                    Err(_) => http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Move failed")
+                    if let Err(_) = state.conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time) VALUES (?, ?, ?, strftime('%s', 'now'))",
+                        params![&bucket, &chunk, len as i64]) {
+                        return http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Insert failed")
                     }
-                }));
-    }
+                    if let Err(_) = std::fs::create_dir_all(format!("{}/data/{}/{}", state.config.data_dir, &bucket, &chunk[..2])) {
+                        return http_message_i(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Could not create bucket folder",
+                        );
+                    }
+                    if let Err(_) = std::fs::rename(&temp_path, format!("{}/data/{}/{}/{}", state.config.data_dir, &bucket, &chunk[..2], &chunk[2..])) {
+                        return http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Move failed")
+                    }
+                }
+                http_message_i(StatusCode::OK, "")
+            }).or_else(|_| {
+                    http_message_i(StatusCode::INTERNAL_SERVER_ERROR, "Ups")
+            }));
 }
 
 fn handle_get_chunk(
     bucket: String,
     chunk: String,
-    conn: Conn,
-    opt: bool,
+    req: Request<Body>,
+    state: Arc<State>,
+    head: bool,
 ) -> ResponseFuture {
-    // TODO auth
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Read) {
+        warn!("Unauthorized access for get chunk {}/{}", bucket, chunk);
+        return res;
+    }
+
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
     if !check_hash(chunk.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad chunk");
     }
-    let conn = conn.lock().unwrap();
+    let conn = state.conn.lock().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, content, size FROM chunks WHERE bucket=? AND hash=?")
         .unwrap();
@@ -174,7 +230,7 @@ fn handle_get_chunk(
         }
         None => return http_message(StatusCode::NOT_FOUND, "Not found"),
     };
-    if opt {
+    if head {
         return Box::new(future::ok(
             Response::builder()
                 .status(StatusCode::OK)
@@ -183,103 +239,138 @@ fn handle_get_chunk(
                 .unwrap(),
         ));
     }
-    match content {
-        Some(content) => {
-            return Box::new(future::ok(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(CONTENT_LENGTH, size)
-                    .body(Body::from(content))
-                    .unwrap(),
-            ))
+    let content = match content {
+        Some(content) => content,
+        None => {
+            let path = format!(
+                "{}/data/{}/{}/{}",
+                state.config.data_dir,
+                &bucket,
+                &chunk[..2],
+                &chunk[2..]
+            );
+            match std::fs::read(path) {
+                Ok(data) => data,
+                Err(_) => return http_message(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing"),
+            }
         }
-        None => return http_message(StatusCode::NOT_IMPLEMENTED, "Not implemented"),
-    }
+    };
+
+    return Box::new(future::ok(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, size)
+            .body(Body::from(content))
+            .unwrap(),
+    ));
 }
 
 fn handle_delete_chunk(
     bucket: String,
     chunk: String,
-    conn: Conn) -> ResponseFuture {
-    // TODO auth
+    req: Request<Body>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+        warn!("Unauthorized access for delete chunk {}/{}", bucket, chunk);
+        return res;
+    }
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
     if !check_hash(chunk.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad chunk");
     }
-    match conn.lock().unwrap().execute("DELETE FROM chunks WHERE bucket=? AND hash=?", params![bucket, chunk]) {
+    match state.conn.lock().unwrap().execute(
+        "DELETE FROM chunks WHERE bucket=? AND hash=?",
+        params![bucket, chunk],
+    ) {
         Err(_) => return http_message(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
         Ok(0) => return http_message(StatusCode::NOT_FOUND, "Not found"),
         Ok(_) => return http_message(StatusCode::OK, ""),
     }
 }
 
-fn handle_list_chunks(
-    bucket: String,
-    conn: Conn) -> ResponseFuture {
-    // TODO auth
+fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Read) {
+        warn!("Unauthorized access for list chunks {}", bucket);
+        return res;
+    }
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
     let mut ans = "".to_string();
-    let conn = conn.lock().unwrap();
+    let conn = state.conn.lock().unwrap();
     let mut stmt = conn
         .prepare("SELECT hash FROM chunks WHERE bucket=?")
         .unwrap();
-    
-    for row in stmt.query_map(params![bucket], |row| Ok(row.get(0)?)).unwrap() {
-        let row : String = row.unwrap();
+
+    for row in stmt
+        .query_map(params![bucket], |row| Ok(row.get(0)?))
+        .unwrap()
+    {
+        let row: String = row.unwrap();
         ans.push_str(&row);
         ans.push('\n');
     }
     Box::new(future::ok(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(ans))
-                    .unwrap()))
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(ans))
+            .unwrap(),
+    ))
 }
 
-fn handle_get_roots(
-    bucket: String,
-    conn: Conn) -> ResponseFuture {
-
-    // TODO auth
+fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Read) {
+        warn!("Unauthorized access for get roots {}", bucket);
+        return res;
+    }
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
 
-    let conn = conn.lock().unwrap();
+    let conn = state.conn.lock().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, host, time, hash FROM roots WHERE bucket=?")
         .unwrap();
-    
+
     let mut ans = "".to_string();
-    for t in stmt.query_map(params![bucket], |row| Ok( (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap() {
+    for t in stmt
+        .query_map(params![bucket], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+    {
         let t = t.unwrap();
-        let id:i64 = t.0;
-        let host : String = t.1;
-        let time : i64 = t.2;
-        let hash : String = t.3;
+        let id: i64 = t.0;
+        let host: String = t.1;
+        let time: i64 = t.2;
+        let hash: String = t.3;
         if !ans.is_empty() {
-             ans.push('\x01');
+            ans.push('\x01');
         }
         ans.push_str(&format!("{}\0{}\0{}\0{}", id, host, time, hash));
     }
     Box::new(future::ok(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(ans))
-                    .unwrap()))
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(ans))
+            .unwrap(),
+    ))
 }
 
 fn handle_put_root(
     bucket: String,
     host: String,
     req: Request<Body>,
-    conn: Conn) -> ResponseFuture {
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Write) {
+        warn!("Unauthorized access for put root {}", bucket);
+        return res;
+    }
 
-     // TODO auth
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
@@ -298,7 +389,7 @@ fn handle_put_root(
                 if !check_hash(s.as_ref()) {
                     return http_message_i(StatusCode::BAD_REQUEST, "Bad bucket");
                 }
-                let res = conn.lock().unwrap().execute("INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
+                let res = state.conn.lock().unwrap().execute("INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
                     params![&bucket, &host, &s]);
                 match res {
                     Ok(_) => http_message_i(StatusCode::OK, ""),
@@ -311,48 +402,66 @@ fn handle_delete_root(
     bucket: String,
     host: String,
     root: String,
-    conn: Conn) -> ResponseFuture {
+    req: Request<Body>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+        warn!("Unauthorized access for delete root {}", bucket);
+        return res;
+    }
 
-    // TODO auth
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
     }
 
-    match conn.lock().unwrap().execute("DELETE FROM roots WHERE bucket=? AND host=? AND id=?", params![bucket, host, root]) {
+    match state.conn.lock().unwrap().execute(
+        "DELETE FROM roots WHERE bucket=? AND host=? AND id=?",
+        params![bucket, host, root],
+    ) {
         Err(_) => return http_message(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
         Ok(0) => return http_message(StatusCode::NOT_FOUND, "Not found"),
         Ok(_) => return http_message(StatusCode::OK, ""),
     }
 }
 
-fn backup_serve(req: Request<Body>, conn: Conn) -> ResponseFuture {
+fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req.uri().path().split("/").map(|v| v.to_string()).collect();
     if req.method() == &Method::GET && path.len() == 4 && path[1] == "chunks" {
-        return handle_get_chunk(path[2].clone(), path[3].clone(), conn, false);
+        return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false);
     } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "chunks" {
-        return handle_put_chunk(path[2].clone(), path[3].clone(), req, conn);
+        return handle_put_chunk(path[2].clone(), path[3].clone(), req, state);
     } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "chunks" {
-        return handle_delete_chunk(path[2].clone(), path[3].clone(), conn);
-    } else if req.method() == &Method::OPTIONS && path.len() == 4 && path[1] == "chunks" {
-        return handle_get_chunk(path[2].clone(), path[3].clone(), conn, true);
+        return handle_delete_chunk(path[2].clone(), path[3].clone(), req, state);
+    } else if req.method() == &Method::HEAD && path.len() == 4 && path[1] == "chunks" {
+        return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, true);
     } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "chunks" {
-        return handle_list_chunks(path[2].clone(), conn);
+        return handle_list_chunks(path[2].clone(), req, state);
     } else if req.method() == &Method::GET && path.len() == 4 && path[1] == "roots" {
-        return handle_get_roots(path[2].clone(), conn);
+        return handle_get_roots(path[2].clone(), req, state);
     } else if req.method() == &Method::PUT && path.len() == 3 && path[1] == "roots" {
-        return handle_put_root(path[2].clone(), path[3].clone(), req, conn);
+        return handle_put_root(path[2].clone(), path[3].clone(), req, state);
     } else if req.method() == &Method::DELETE && path.len() == 5 && path[1] == "roots" {
-        return handle_delete_root(path[2].clone(), path[3].clone(), path[4].clone(), conn);
+        return handle_delete_root(
+            path[2].clone(),
+            path[3].clone(),
+            path[4].clone(),
+            req,
+            state,
+        );
     } else {
         return http_message(StatusCode::NOT_FOUND, "Not found");
     }
 }
 
-fn setup_db() -> Conn {
-    let conn = Connection::open("backup.db").expect("Unable to open hash cache");
+fn setup_db(conf: &Config) -> Connection {
+    trace!("opening database");
+    let conn = Connection::open(format!("{}/backup.db", conf.data_dir))
+        .expect("Unable to open hash cache");
 
-    conn.pragma_update(None, "journal_mode", &"WAL".to_string()).expect("Cannot enable wal");
+    conn.pragma_update(None, "journal_mode", &"WAL".to_string())
+        .expect("Cannot enable wal");
 
+    trace!("Creating chunks table");
     // The chunks table contains metadata for all chunks
     // and the content of small chunks
     conn.execute(
@@ -368,6 +477,7 @@ fn setup_db() -> Conn {
     )
     .expect("Unable to create cache table");
 
+    trace!("Creating roots table");
     // The roots table records the root of the merkel tree of all backups
     conn.execute(
         "CREATE TABLE IF NOT EXISTS roots (
@@ -381,21 +491,111 @@ fn setup_db() -> Conn {
     )
     .expect("Unable to create cache table");
 
-    return Arc::new(Mutex::new(conn));
+    return conn;
 }
 
 fn main() {
-    let conn = setup_db();
+    simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
 
-    let addr = ([127, 0, 0, 1], 3000).into();
+    let matches = App::new("mbackup server")
+        .version("0.1")
+        .about("A server for mbackup")
+        .author("Jakob Truelsen <jakob@scalgo.com>")
+        .arg(
+            Arg::with_name("verbosity")
+                .short("v")
+                .long("verbosity")
+                .takes_value(true)
+                .possible_values(&["none", "error", "warn", "info", "debug", "trace"])
+                .help("Sets the level of verbosity"),
+        )
+        .arg(
+            Arg::with_name("bind")
+                .short("b")
+                .long("bind")
+                .takes_value(true)
+                .help("The interface/port to bind to"),
+        )
+        .arg(
+            Arg::with_name("data_dir")
+                .long("data-dir")
+                .takes_value(true)
+                .help("Where do we store data"),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("config")
+                .short("c")
+                .takes_value(true)
+                .help("Path to config file"),
+        )
+        .get_matches();
 
+    let mut config: Config = match matches.value_of("config") {
+        Some(path) => {
+            let data = match std::fs::read_to_string(path) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Unable to open config file {}: {:?}", path, e);
+                    std::process::exit(1)
+                }
+            };
+            match toml::from_str(&data) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("Unable to parse config file {}: {:?}", path, e);
+                    std::process::exit(1)
+                }
+            }
+        }
+        None => Config {
+            ..Default::default()
+        },
+    };
+
+    match matches.value_of("verbosity") {
+        Some("none") => config.verbosity = log::LevelFilter::Off,
+        Some("error") => config.verbosity = log::LevelFilter::Error,
+        Some("warn") => config.verbosity = log::LevelFilter::Warn,
+        Some("info") => config.verbosity = log::LevelFilter::Info,
+        Some("debug") => config.verbosity = log::LevelFilter::Debug,
+        Some("trace") => config.verbosity = log::LevelFilter::Trace,
+        Some(v) => panic!("Unknown log level {}", v),
+        None => (),
+    }
+
+    if let Some(bind) = matches.value_of("bind") {
+        config.bind = bind.to_string();
+    }
+
+    if let Some(dir) = matches.value_of("data_dir") {
+        config.data_dir = dir.to_string();
+    }
+    log::set_max_level(config.verbosity);
+
+    debug!("Config {:?}", config);
+
+    let conn = setup_db(&config);
+    let state = Arc::new(State {
+        config: config,
+        conn: Mutex::new(conn),
+    });
+
+    let addr = match state.config.bind.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Bad bind address {}: {:?}", state.config.bind, e);
+            std::process::exit(1)
+        }
+    };
+
+    info!("Server listening on {}", state.config.bind);
     let server = Server::bind(&addr)
         .serve(move || {
-            let conn = conn.clone();
-            service_fn(move |req| backup_serve(req, conn.clone()))
+            let state = state.clone();
+            service_fn(move |req| backup_serve(req, state.clone()))
         })
-        .map_err(|e| eprintln!("server error: {}", e));
+        .map_err(|e| error!("server error: {}", e));
 
-    // Run this server for... forever!
     hyper::rt::run(server);
 }

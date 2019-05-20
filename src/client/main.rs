@@ -13,40 +13,147 @@ use rusqlite::{params, Connection, NO_PARAMS};
 
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
+use crypto::symmetriccipher::SynchronousStreamCipher;
 use std::time::SystemTime;
+extern crate hex;
+
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
-fn push_chunk(content: &[u8]) -> String {
-    let mut hasher = Blake2b::new(256 / 8);
-    //TODO seed with key derived value
-    hasher.input(content);
+extern crate reqwest;
 
-    //TODO try to send the content to remote server if it is not in the bloom filter
+struct State {
+    bucket: [u8; 32],
+    seed: [u8; 32],
+    key: [u8; 32],
+    iv: [u8; 32],
+    host: String,
+    conn: Connection,
+    recheck: bool,
+    client: reqwest::Client,
 
-    return hasher.result_str().to_string();
+    scan: bool,
+
+    current_bytes: u64,
+    current_files: u64,
+    current_folders: u64,
+    transfer_bytes: u64,
+    transfer_files: u64,
+    total_files: u64,
+    total_folders: u64,
+    total_bytes: u64,
+    last_progress_time: std::time::Instant,
 }
 
-fn backup_file(path: &Path, size: u64, mtime: u64, conn: &Connection) -> Option<String> {
+fn emit_progress(state: &mut State) {
+    let now = std::time::Instant::now();
+    if now.duration_since(state.last_progress_time).as_millis() < 500 {
+        return;
+    }
+    if state.scan {
+        info!(
+            "Scanning: {} folders, {}/{} files, {}/{} Mb",
+            state.total_folders,
+            state.transfer_files,
+            state.total_files,
+            state.transfer_bytes / 1024 / 1024,
+            state.total_bytes / 1024 / 1024
+        );
+    } else {
+        info!(
+            "Backing up: {} / {} folders, {}/{}/{} files, {}/{}/{} Mb",
+            state.current_folders,
+            state.total_folders,
+            state.current_files,
+            state.transfer_files,
+            state.total_files,
+            state.current_bytes / 1024 / 1024,
+            state.transfer_bytes / 1024 / 1024,
+            state.total_bytes / 1024 / 1024
+        );
+    }
+
+    state.last_progress_time = now;
+}
+
+fn push_chunk(content: &[u8], state: &mut State) -> String {
+    let mut hasher = Blake2b::new(256 / 8);
+    hasher.input(&state.seed);
+    hasher.input(content);
+    let hash = hasher.result_str().to_string();
+
+    let url = format!(
+        "{}/chunks/{}/{}",
+        state.host,
+        hex::encode(&state.bucket),
+        &hash
+    );
+    let res = state.client.head(&url[..]).send().expect("Head failed");
+    let send = match res.status() {
+        reqwest::StatusCode::OK => false,
+        reqwest::StatusCode::NOT_FOUND => true,
+        _ => panic!("Upload of chunk failed"),
+    };
+
+    if send {
+        let mut crypted = Vec::new();
+        crypted.resize(content.len(), 0);
+        crypto::chacha20::ChaCha20::new(&state.key, &state.iv[0..12])
+            .process(content, &mut crypted);
+
+        let res = state
+            .client
+            .put(&url[..])
+            .body(reqwest::Body::from(crypted))
+            .send()
+            .expect("Send failed");
+        if res.status() != reqwest::StatusCode::OK {
+            panic!("Upload of chunk failed")
+        }
+    }
+
+    state.current_bytes += content.len() as u64;
+    emit_progress(state);
+    return hash;
+}
+
+fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<String> {
+    if state.scan {
+        state.total_files += 1;
+        state.total_bytes += size;
+    }
+
+    emit_progress(state);
+
     // IF the file is empty we just do nothing
     if size == 0 {
         return Some("".to_string());
     }
 
     // Check if we have allready checked the file once
-    // TODO jakob: One should be able to recheck everything with a commandline switch
-    let mut stmt = conn
-        .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
-        .unwrap();
-    let mut rows = stmt
-        .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
-        .unwrap();
-    match rows.next().expect("Unable to read db row") {
-        Some(row) => {
-            let s: String = row.get(0).expect("chunks should not be null");
-            //debug!("Skipping file {:?}: {}", path, &s);
-            return Some(s);
+    if !state.recheck {
+        let mut stmt = state
+            .conn
+            .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
+            .unwrap();
+        let mut rows = stmt
+            .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
+            .unwrap();
+        match rows.next().expect("Unable to read db row") {
+            Some(row) => {
+                let s: String = row.get(0).expect("chunks should not be null");
+                //debug!("Skipping file {:?}: {}", path, &s);
+                return Some(s);
+            }
+            None => (),
         }
-        None => (),
+    }
+
+    if state.scan {
+        state.transfer_files += 1;
+        state.transfer_bytes += size;
+        return Some("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
+    } else {
+        state.current_files += 1;
     }
 
     // Open the file and read each chunk
@@ -83,7 +190,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, conn: &Connection) -> Option<
         if chunks.len() != 0 {
             chunks.push_str(&",");
         }
-        chunks.push_str(&push_chunk(&buffer[..used]));
+        chunks.push_str(&push_chunk(&buffer[..used], state));
 
         if used != buffer.len() {
             break;
@@ -92,13 +199,14 @@ fn backup_file(path: &Path, size: u64, mtime: u64, conn: &Connection) -> Option<
 
     //TODO check if the mtime has changed while we where pushing
 
-    conn.execute(
-        "REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)",
-        params![&path.to_str().unwrap(), size as i64, mtime as i64, &chunks],
-    )
-    .expect("insert failed");
+    state
+        .conn
+        .execute(
+            "REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)",
+            params![&path.to_str().unwrap(), size as i64, mtime as i64, &chunks],
+        )
+        .expect("insert failed");
 
-    //info!("Visited file {:?}: {}", path, chunks);
     return None;
 }
 
@@ -109,10 +217,10 @@ struct DirEnt {
     content: String,
 }
 
-fn push_ents(mut ents: Vec<DirEnt>) -> String {
-    ents.sort();
+fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> String {
+    entries.sort();
     let mut ans = "".to_string();
-    for ent in ents {
+    for ent in entries {
         if !ans.is_empty() {
             ans.push('\0');
         }
@@ -122,11 +230,28 @@ fn push_ents(mut ents: Vec<DirEnt>) -> String {
         ans.push('\x01');
         ans.push_str(&ent.content);
     }
-    return push_chunk(ans.as_bytes());
+    return push_chunk(ans.as_bytes(), state);
 }
 
-fn backup_folder(dir: &Path, conn: &Connection) -> Option<String> {
-    let entries = match fs::read_dir(dir) {
+fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
+    let mut ans = 0;
+    for ent in entries {
+        if ans != 0 {
+            ans += 1
+        }
+        ans += ent.name.len() + 2 + ent.type_.len() + ent.content.len()
+    }
+    return ans as u64;
+}
+
+fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
+    if state.scan {
+        state.total_folders += 1;
+    } else {
+        state.current_folders += 1;
+    }
+    emit_progress(state);
+    let raw_entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
             warn!("Unable to list dir {:?}: {:?}", dir, error);
@@ -134,9 +259,9 @@ fn backup_folder(dir: &Path, conn: &Connection) -> Option<String> {
         }
     };
 
-    let mut ents: Vec<DirEnt> = Vec::new();
+    let mut entries: Vec<DirEnt> = Vec::new();
 
-    for entry in entries {
+    for entry in raw_entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -165,8 +290,8 @@ fn backup_folder(dir: &Path, conn: &Connection) -> Option<String> {
         }
 
         if md.is_dir() {
-            match backup_folder(&path, conn) {
-                Some(chunks) => ents.push(DirEnt {
+            match backup_folder(&path, state) {
+                Some(chunks) => entries.push(DirEnt {
                     name: filename.to_string(),
                     type_: "file".to_string(),
                     content: chunks,
@@ -184,11 +309,11 @@ fn backup_folder(dir: &Path, conn: &Connection) -> Option<String> {
                     continue;
                 }
             };
-            let chunks = match backup_file(&path, md.len(), mtime, conn) {
+            let chunks = match backup_file(&path, md.len(), mtime, state) {
                 Some(chunks) => chunks,
                 None => continue,
             };
-            ents.push(DirEnt {
+            entries.push(DirEnt {
                 name: filename.to_string(),
                 type_: "file".to_string(),
                 content: chunks,
@@ -197,10 +322,21 @@ fn backup_folder(dir: &Path, conn: &Connection) -> Option<String> {
 
         }
     }
-    return Some(push_ents(ents));
+    if state.scan {
+        state.total_bytes += bytes_ents(entries);
+        return Some("00000000000000000000000000000000".to_string());
+    } else {
+        return Some(push_ents(entries, state));
+    }
 }
 
-fn derive_secrets(password: &str, root: &mut [u8], key: &mut [u8], seed: &mut [u8], iv: &mut [u8]) {
+fn derive_secrets(
+    password: &str,
+    bucket: &mut [u8],
+    key: &mut [u8],
+    seed: &mut [u8],
+    iv: &mut [u8],
+) {
     // Derive secrets from password, since we need the same value every time
     // on different machines we cannot use salts or nonces
     // We derive the secrects
@@ -239,40 +375,68 @@ fn derive_secrets(password: &str, root: &mut [u8], key: &mut [u8], seed: &mut [u
             prev = cur;
         }
     }
-    root.copy_from_slice(&data[0..64]);
-    seed.copy_from_slice(&data[128..128 + 64]);
-    iv.copy_from_slice(&data[1024..1024 + 64]);
-    key.copy_from_slice(&data[(ITEMS - 1) * 64..]);
+    bucket.copy_from_slice(&data[0..W]);
+    seed.copy_from_slice(&data[128..128 + W]);
+    iv.copy_from_slice(&data[1024..1024 + W]);
+    key.copy_from_slice(&data[(ITEMS - 1) * W..]);
 }
 
 fn main() {
-    simple_logger::init().expect("Unable to init log");
+    simple_logger::init_with_level(log::Level::Info).expect("Unable to init log");
     info!("Derive secret!!\n");
-    let mut root = [0; 32];
+    let mut bucket = [0; 32];
     let mut seed = [0; 32];
     let mut key = [0; 32];
     let mut iv = [0; 32];
-    derive_secrets("hunter2", &mut root, &mut key, &mut seed, &mut iv);
+    derive_secrets("hunter2", &mut bucket, &mut key, &mut seed, &mut iv);
     info!("Derive secret!!\n");
 
     let conn = Connection::open("cache.db").expect("Unable to open hash cache");
-    conn.pragma_update(None, "journal_mode", &"WAL".to_string()).expect("Cannot enable wal");
+    {
+        conn.pragma_update(None, "journal_mode", &"WAL".to_string())
+            .expect("Cannot enable wal");
 
-    conn.execute(
-        "create table if not exists files (
-             id integer primary key,
-             path text not null unique,
-             size integer not null,
-             mtime integer not null,
-             chunks text not null
-         )",
-        NO_PARAMS,
-    )
-    .expect("Unable to create cache table");
+        conn.execute(
+            "create table if not exists files (
+                id integer primary key,
+                path text not null unique,
+                size integer not null,
+                mtime integer not null,
+                chunks text not null
+            )",
+            NO_PARAMS,
+        )
+        .expect("Unable to create cache table");
+    }
 
+    let mut state = State {
+        bucket: bucket,
+        seed: seed,
+        key: key,
+        iv: iv,
+        host: "http://localhost:3321".to_string(),
+        conn: conn,
+        recheck: false,
+        client: reqwest::Client::new(),
+        scan: true,
+        current_bytes: 0,
+        current_files: 0,
+        current_folders: 0,
+        transfer_bytes: 0,
+        transfer_files: 0,
+        total_files: 0,
+        total_folders: 0,
+        total_bytes: 0,
+        last_progress_time: std::time::Instant::now(),
+    };
+
+    info!("Scanning");
+    backup_folder(Path::new("/home/test/test"), &mut state).unwrap();
+
+    state.scan = false;
     info!("Backup started");
     info!(
         "Root item {}",
-        backup_folder(Path::new("/home/test/test"), &conn).unwrap()
+        backup_folder(Path::new("/home/test/test"), &mut state).unwrap()
     );
 }
