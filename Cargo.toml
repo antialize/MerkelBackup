@@ -26,4 +26,6 @@ hex = "0"
 clap = "2.33.0"
 toml = "0.5.1"
 serde = "1.0"
-
+native-tls = ""
+tokio-tls = "0.2.1"
+base64 = "0.10.1"
