@@ -209,7 +209,63 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
         None => (),
     }
 
-    //TODO copy in more strings and validate that they are non empty
+    if let Some(v) = matches.value_of("user") {
+        config.user = v.to_string();
+    }
+    if config.user.is_empty() {
+        panic!("No user specified");
+    }
+
+    if let Some(v) = matches.value_of("password") {
+        config.password = v.to_string();
+    }
+    if config.password.is_empty() {
+        panic!("No password specified");
+    }
+
+    if let Some(v) = matches.value_of("encryption_key") {
+        config.encryption_key = v.to_string();
+    }
+    if config.encryption_key.is_empty() {
+        panic!("No encryption key specified");
+    }
+
+    if let Some(v) = matches.value_of("server") {
+        config.server = v.to_string();
+    }
+    if config.server.is_empty() {
+        panic!("No server specified");
+    }
+
+    match matches.subcommand_name() {
+        Some("backup") => {
+            if matches.is_present("recheck") {
+                config.recheck = true;
+            }
+
+            if let Some(v) = matches.value_of("cache_db") {
+                config.cache_db = v.to_string();
+            }
+            if config.cache_db.is_empty() {
+                panic!("No cache_db specified");
+            }
+
+            if let Some(v) = matches.value_of("hostname") {
+                config.hostname = v.to_string();
+            }
+            if config.hostname.is_empty() {
+                panic!("No host name specified");
+            }
+
+            if let Some(v) = matches.values_of("dir") {
+                config.backup_dirs = v.map(|v| v.to_string()).collect();
+            }
+            if config.backup_dirs.is_empty() {
+                panic!("No backup dirs specified");
+            }
+        }
+        _ => panic!("No sub command"),
+    }
 
     return (config, matches);
 }
