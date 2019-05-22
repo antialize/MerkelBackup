@@ -64,11 +64,16 @@ impl Default for Config {
     }
 }
 
-struct State {
+#[derive(Default)]
+struct Secrets {
     bucket: [u8; 32],
-    seed: [u8; 32],
+    seed : [u8; 32],
     key: [u8; 32],
     iv: [u8; 32],
+}
+
+struct State {
+    secrets: Secrets,
     config: Config,
     conn: Connection,
     client: reqwest::Client,
@@ -117,14 +122,14 @@ fn emit_progress(state: &mut State) {
 
 fn push_chunk(content: &[u8], state: &mut State) -> String {
     let mut hasher = Blake2b::new(256 / 8);
-    hasher.input(&state.seed);
+    hasher.input(&state.secrets.seed);
     hasher.input(content);
     let hash = hasher.result_str().to_string();
 
     let url = format!(
         "{}/chunks/{}/{}",
         &state.config.server,
-        hex::encode(&state.bucket),
+        hex::encode(&state.secrets.bucket),
         &hash
     );
     let res = state.client.head(&url[..]).send().expect("Head failed");
@@ -137,7 +142,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
     if send {
         let mut crypted = Vec::new();
         crypted.resize(content.len(), 0);
-        crypto::chacha20::ChaCha20::new(&state.key, &state.iv[0..12])
+        crypto::chacha20::ChaCha20::new(&state.secrets.key, &state.secrets.iv[0..12])
             .process(content, &mut crypted);
 
         let res = state
@@ -370,13 +375,58 @@ fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
     }
 }
 
+fn backup(config: Config, secrets: Secrets) {
+    let conn = Connection::open(&config.cache_db).expect("Unable to open hash cache");
+    {
+        conn.pragma_update(None, "journal_mode", &"WAL".to_string())
+            .expect("Cannot enable wal");
+
+        conn.execute(
+            "create table if not exists files (
+                id integer primary key,
+                path text not null unique,
+                size integer not null,
+                mtime integer not null,
+                chunks text not null
+            )",
+            NO_PARAMS,
+        )
+        .expect("Unable to create cache table");
+    }
+
+    let mut state = State {
+        secrets: secrets,
+        config: config,
+        conn: conn,
+        client: reqwest::Client::new(),
+        scan: true,
+        current_bytes: 0,
+        current_files: 0,
+        current_folders: 0,
+        transfer_bytes: 0,
+        transfer_files: 0,
+        total_files: 0,
+        total_folders: 0,
+        total_bytes: 0,
+        last_progress_time: std::time::Instant::now(),
+    };
+
+    info!("Scanning");
+    backup_folder(Path::new("/home/test/test"), &mut state).unwrap();
+
+    state.scan = false;
+    info!("Backup started");
+    info!(
+        "Root item {}",
+        backup_folder(Path::new("/home/test/test"), &mut state).unwrap()
+    );
+}
+
+
+
 fn derive_secrets(
-    password: &str,
-    bucket: &mut [u8],
-    key: &mut [u8],
-    seed: &mut [u8],
-    iv: &mut [u8],
-) {
+    password: &str
+) -> Secrets {
     // Derive secrets from password, since we need the same value every time
     // on different machines we cannot use salts or nonces
     // We derive the secrects
@@ -415,10 +465,12 @@ fn derive_secrets(
             prev = cur;
         }
     }
-    bucket.copy_from_slice(&data[0..W]);
-    seed.copy_from_slice(&data[128..128 + W]);
-    iv.copy_from_slice(&data[1024..1024 + W]);
-    key.copy_from_slice(&data[(ITEMS - 1) * W..]);
+    let mut secrets:Secrets = Default::default();
+    secrets.bucket.copy_from_slice(&data[0..W]);
+    secrets.seed.copy_from_slice(&data[128..128 + W]);
+    secrets.iv.copy_from_slice(&data[1024..1024 + W]);
+    secrets.key.copy_from_slice(&data[(ITEMS - 1) * W..]);
+    secrets
 }
 
 fn parse_config() -> (Config, ArgMatches<'static>) {
@@ -572,55 +624,7 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
     return (config, matches);
 }
 
-fn backup(config: Config, bucket: [u8; 32], seed: [u8; 32], key: [u8; 32], iv: [u8; 32]) {
-    let conn = Connection::open(&config.cache_db).expect("Unable to open hash cache");
-    {
-        conn.pragma_update(None, "journal_mode", &"WAL".to_string())
-            .expect("Cannot enable wal");
 
-        conn.execute(
-            "create table if not exists files (
-                id integer primary key,
-                path text not null unique,
-                size integer not null,
-                mtime integer not null,
-                chunks text not null
-            )",
-            NO_PARAMS,
-        )
-        .expect("Unable to create cache table");
-    }
-
-    let mut state = State {
-        bucket: bucket,
-        seed: seed,
-        key: key,
-        iv: iv,
-        config: config,
-        conn: conn,
-        client: reqwest::Client::new(),
-        scan: true,
-        current_bytes: 0,
-        current_files: 0,
-        current_folders: 0,
-        transfer_bytes: 0,
-        transfer_files: 0,
-        total_files: 0,
-        total_folders: 0,
-        total_bytes: 0,
-        last_progress_time: std::time::Instant::now(),
-    };
-
-    info!("Scanning");
-    backup_folder(Path::new("/home/test/test"), &mut state).unwrap();
-
-    state.scan = false;
-    info!("Backup started");
-    info!(
-        "Root item {}",
-        backup_folder(Path::new("/home/test/test"), &mut state).unwrap()
-    );
-}
 
 fn main() {
     simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
@@ -630,21 +634,13 @@ fn main() {
     debug!("Config {:?}", config);
 
     info!("Derive secret!!\n");
-    let mut bucket = [0; 32];
-    let mut seed = [0; 32];
-    let mut key = [0; 32];
-    let mut iv = [0; 32];
-    derive_secrets(
+    let secrets = derive_secrets(
         &config.encryption_key,
-        &mut bucket,
-        &mut key,
-        &mut seed,
-        &mut iv,
     );
     info!("Derive secret!!\n");
 
     match matches.subcommand_name() {
-        Some("backup") => backup(config, bucket, seed, key, iv),
+        Some("backup") => backup(config, secrets),
         _ => panic!("No sub command"),
     }
 }
