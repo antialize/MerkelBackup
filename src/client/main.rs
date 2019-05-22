@@ -1,38 +1,78 @@
-use std::fs;
-use std::path::Path;
+extern crate clap;
+extern crate crypto;
+extern crate hex;
+extern crate reqwest;
+extern crate rusqlite;
+extern crate serde;
 extern crate simple_logger;
+
+use clap::{App, Arg, ArgMatches, SubCommand};
+use crypto::blake2b::Blake2b;
+use crypto::digest::Digest;
+use crypto::symmetriccipher::SynchronousStreamCipher;
+use rusqlite::{params, Connection, NO_PARAMS};
+use serde::Deserialize;
+use std::fs;
 use std::io::Read;
+use std::path::Path;
+use std::time::SystemTime;
 
 #[macro_use]
 extern crate log;
 
-extern crate crypto;
-extern crate rusqlite;
-
-use rusqlite::{params, Connection, NO_PARAMS};
-
-use crypto::blake2b::Blake2b;
-use crypto::digest::Digest;
-use crypto::symmetriccipher::SynchronousStreamCipher;
-use std::time::SystemTime;
-extern crate hex;
-
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
-extern crate reqwest;
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(remote = "log::LevelFilter")]
+pub enum LevelFilterDef {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+#[derive(Deserialize, PartialEq, Debug)]
+#[serde(default, deny_unknown_fields)]
+struct Config {
+    #[serde(with = "LevelFilterDef")]
+    verbosity: log::LevelFilter,
+    backup_dirs: Vec<String>,
+    user: String,
+    password: String,
+    encryption_key: String,
+    server: String,
+    recheck: bool,
+    cache_db: String,
+    host: String,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            verbosity: log::LevelFilter::Info,
+            backup_dirs: Vec::new(),
+            user: "".to_string(),
+            password: "".to_string(),
+            encryption_key: "".to_string(),
+            server: "".to_string(),
+            recheck: false,
+            cache_db: "chace.db".to_string(),
+            host: "".to_string(),
+        }
+    }
+}
 
 struct State {
     bucket: [u8; 32],
     seed: [u8; 32],
     key: [u8; 32],
     iv: [u8; 32],
-    host: String,
+    config: Config,
     conn: Connection,
-    recheck: bool,
     client: reqwest::Client,
-
     scan: bool,
-
     current_bytes: u64,
     current_files: u64,
     current_folders: u64,
@@ -83,7 +123,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
 
     let url = format!(
         "{}/chunks/{}/{}",
-        state.host,
+        &state.config.server,
         hex::encode(&state.bucket),
         &hash
     );
@@ -130,7 +170,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     }
 
     // Check if we have allready checked the file once
-    if !state.recheck {
+    if !state.config.recheck {
         let mut stmt = state
             .conn
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
@@ -381,17 +421,159 @@ fn derive_secrets(
     key.copy_from_slice(&data[(ITEMS - 1) * W..]);
 }
 
-fn main() {
-    simple_logger::init_with_level(log::Level::Info).expect("Unable to init log");
-    info!("Derive secret!!\n");
-    let mut bucket = [0; 32];
-    let mut seed = [0; 32];
-    let mut key = [0; 32];
-    let mut iv = [0; 32];
-    derive_secrets("hunter2", &mut bucket, &mut key, &mut seed, &mut iv);
-    info!("Derive secret!!\n");
+fn parse_config() -> (Config, ArgMatches<'static>) {
+    let matches = App::new("mbackup server")
+        .version("0.1")
+        .about("A client for mbackup")
+        .author("Jakob Truelsen <jakob@scalgo.com>")
+        .arg(
+            Arg::with_name("verbosity")
+                .short("v")
+                .long("verbosity")
+                .takes_value(true)
+                .possible_values(&["none", "error", "warn", "info", "debug", "trace"])
+                .help("Sets the level of verbosity"),
+        )
+        .arg(
+            Arg::with_name("user")
+                .short("u")
+                .long("user")
+                .takes_value(true)
+                .help("The user to connect as"),
+        )
+        .arg(
+            Arg::with_name("password")
+                .short("p")
+                .long("password")
+                .takes_value(true)
+                .help("The password to connect with"),
+        )
+        .arg(
+            Arg::with_name("encryption_key")
+                .short("k")
+                .long("key")
+                .takes_value(true)
+                .help("The key to use when encrypting data"),
+        )
+        .arg(
+            Arg::with_name("server")
+                .short("s")
+                .long("server")
+                .takes_value(true)
+                .help("The remote server to connect to"),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("config")
+                .short("c")
+                .takes_value(true)
+                .help("Path to config file"),
+        )
+        .subcommand(
+            SubCommand::with_name("backup")
+                .about("perform a backp")
+                .arg(
+                    Arg::with_name("recheck")
+                        .long("recheck")
+                        .help("Recheck all the hashes"),
+                )
+                .arg(
+                    Arg::with_name("cache_db")
+                        .long("cache-db")
+                        .takes_value(true)
+                        .help("The path to the hash cache db"),
+                )
+                .arg(
+                    Arg::with_name("hostname")
+                        .long("hostname")
+                        .takes_value(true)
+                        .help("Hostname to back up as"),
+                )
+                .arg(
+                    Arg::with_name("dir")
+                        .long("dir")
+                        .takes_value(true)
+                        .multiple(true)
+                        .help("Directories to backup"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("prune")
+                .about("Remove old roots, and then perform garbage collection"),
+        )
+        .subcommand(SubCommand::with_name("validate").about("Validate all backed up content"))
+        .subcommand(
+            SubCommand::with_name("restore")
+                .about("restore backup files")
+                .arg(
+                    Arg::with_name("root")
+                        .index(1)
+                        .required(true)
+                        .help("the root to restore"),
+                )
+                .arg(
+                    Arg::with_name("pattern")
+                        .index(2)
+                        .required(true)
+                        .help("pattern of files to restore"),
+                )
+                .arg(
+                    Arg::with_name("hostname")
+                        .long("hostname")
+                        .takes_value(true)
+                        .help("Hostname to restore from"),
+                )
+                .arg(
+                    Arg::with_name("dest")
+                        .long("dest")
+                        .short("d")
+                        .takes_value(true)
+                        .default_value("/")
+                        .help("Where to store the restored files"),
+                ),
+        )
+        .get_matches();
 
-    let conn = Connection::open("cache.db").expect("Unable to open hash cache");
+    let mut config: Config = match matches.value_of("config") {
+        Some(path) => {
+            let data = match std::fs::read_to_string(path) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Unable to open config file {}: {:?}", path, e);
+                    std::process::exit(1)
+                }
+            };
+            match toml::from_str(&data) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("Unable to parse config file {}: {:?}", path, e);
+                    std::process::exit(1)
+                }
+            }
+        }
+        None => Config {
+            ..Default::default()
+        },
+    };
+
+    match matches.value_of("verbosity") {
+        Some("none") => config.verbosity = log::LevelFilter::Off,
+        Some("error") => config.verbosity = log::LevelFilter::Error,
+        Some("warn") => config.verbosity = log::LevelFilter::Warn,
+        Some("info") => config.verbosity = log::LevelFilter::Info,
+        Some("debug") => config.verbosity = log::LevelFilter::Debug,
+        Some("trace") => config.verbosity = log::LevelFilter::Trace,
+        Some(v) => panic!("Unknown log level {}", v),
+        None => (),
+    }
+
+    //TODO copy in more strings and validate that they are non empty
+
+    return (config, matches);
+}
+
+fn backup(config: Config, bucket: [u8; 32], seed: [u8; 32], key: [u8; 32], iv: [u8; 32]) {
+    let conn = Connection::open(&config.cache_db).expect("Unable to open hash cache");
     {
         conn.pragma_update(None, "journal_mode", &"WAL".to_string())
             .expect("Cannot enable wal");
@@ -414,9 +596,8 @@ fn main() {
         seed: seed,
         key: key,
         iv: iv,
-        host: "http://localhost:3321".to_string(),
+        config: config,
         conn: conn,
-        recheck: false,
         client: reqwest::Client::new(),
         scan: true,
         current_bytes: 0,
@@ -439,4 +620,31 @@ fn main() {
         "Root item {}",
         backup_folder(Path::new("/home/test/test"), &mut state).unwrap()
     );
+}
+
+fn main() {
+    simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
+
+    let (config, matches) = parse_config();
+    log::set_max_level(config.verbosity);
+    debug!("Config {:?}", config);
+
+    info!("Derive secret!!\n");
+    let mut bucket = [0; 32];
+    let mut seed = [0; 32];
+    let mut key = [0; 32];
+    let mut iv = [0; 32];
+    derive_secrets(
+        &config.encryption_key,
+        &mut bucket,
+        &mut key,
+        &mut seed,
+        &mut iv,
+    );
+    info!("Derive secret!!\n");
+
+    match matches.subcommand_name() {
+        Some("backup") => backup(config, bucket, seed, key, iv),
+        _ => panic!("No sub command"),
+    }
 }
