@@ -489,9 +489,9 @@ fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
         return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, true);
     } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "chunks" {
         return handle_list_chunks(path[2].clone(), req, state);
-    } else if req.method() == &Method::GET && path.len() == 4 && path[1] == "roots" {
+    } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "roots" {
         return handle_get_roots(path[2].clone(), req, state);
-    } else if req.method() == &Method::PUT && path.len() == 3 && path[1] == "roots" {
+    } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "roots" {
         return handle_put_root(path[2].clone(), path[3].clone(), req, state);
     } else if req.method() == &Method::DELETE && path.len() == 5 && path[1] == "roots" {
         return handle_delete_root(

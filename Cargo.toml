@@ -5,11 +5,11 @@ version = "0.1.0"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
-name = "server"
+name = "mbackupd"
 path = "src/server/main.rs"
 
 [[bin]]
-name = "client"
+name = "mbackup"
 path = "src/client/main.rs"
 
 [dependencies]

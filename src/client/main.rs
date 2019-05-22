@@ -64,7 +64,7 @@ fn derive_secrets(password: &str) -> Secrets {
 }
 
 fn parse_config() -> (Config, ArgMatches<'static>) {
-    let matches = App::new("mbackup server")
+    let matches = App::new("mbackup client")
         .version("0.1")
         .about("A client for mbackup")
         .author("Jakob Truelsen <jakob@scalgo.com>")

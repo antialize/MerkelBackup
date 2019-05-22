@@ -74,11 +74,16 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         hex::encode(&state.secrets.bucket),
         &hash
     );
-    let res = state.client.head(&url[..]).send().expect("Head failed");
+    let res = state
+        .client
+        .head(&url[..])
+        .basic_auth(&state.config.user, Some(&state.config.password))
+        .send()
+        .expect("Head failed");
     let send = match res.status() {
         reqwest::StatusCode::OK => false,
         reqwest::StatusCode::NOT_FOUND => true,
-        _ => panic!("Upload of chunk failed"),
+        code => panic!("Upload of chunk failed {:?}", code),
     };
 
     if send {
@@ -90,11 +95,12 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         let res = state
             .client
             .put(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
             .body(reqwest::Body::from(crypted))
             .send()
             .expect("Send failed");
         if res.status() != reqwest::StatusCode::OK {
-            panic!("Upload of chunk failed")
+            panic!("Upload of chunk failed {:?}", res.status())
         }
     }
 
@@ -280,7 +286,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
             match backup_folder(&path, state) {
                 Some(chunks) => entries.push(DirEnt {
                     name: filename.to_string(),
-                    type_: "file".to_string(),
+                    type_: "dir".to_string(),
                     content: chunks,
                 }),
                 None => continue,
@@ -353,13 +359,41 @@ pub fn run(config: Config, secrets: Secrets) {
         last_progress_time: std::time::Instant::now(),
     };
 
-    info!("Scanning");
-    backup_folder(Path::new("/home/test/test"), &mut state).unwrap();
+    let dirs = state.config.backup_dirs.clone();
+    for dir in dirs.iter() {
+        info!("Scanning {}", &dir);
+        backup_folder(Path::new(dir), &mut state).unwrap();
+    }
 
+    let mut entries: Vec<DirEnt> = Vec::new();
     state.scan = false;
-    info!("Backup started");
-    info!(
-        "Root item {}",
-        backup_folder(Path::new("/home/test/test"), &mut state).unwrap()
+    for dir in dirs.iter() {
+        info!("Backing up {}", &dir);
+        entries.push(DirEnt {
+            name: dir.to_string(),
+            type_: "dir".to_string(),
+            content: backup_folder(Path::new("/home/test/test"), &mut state).unwrap(),
+        });
+    }
+
+    info!("Storing root");
+    let root = push_ents(entries, &mut state);
+
+    let url = format!(
+        "{}/roots/{}/{}",
+        &state.config.server,
+        hex::encode(&state.secrets.bucket),
+        &state.config.hostname
     );
+
+    let res = state
+        .client
+        .put(&url[..])
+        .basic_auth(&state.config.user, Some(&state.config.password))
+        .body(root)
+        .send()
+        .expect("Send failed");
+    if res.status() != reqwest::StatusCode::OK {
+        panic!("Put root failed {}", res.status())
+    }
 }

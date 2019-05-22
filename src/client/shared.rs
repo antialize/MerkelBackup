@@ -25,7 +25,7 @@ pub struct Config {
     pub server: String,
     pub recheck: bool,
     pub cache_db: String,
-    pub host: String,
+    pub hostname: String,
 }
 
 impl Default for Config {
@@ -39,7 +39,7 @@ impl Default for Config {
             server: "".to_string(),
             recheck: false,
             cache_db: "chace.db".to_string(),
-            host: "".to_string(),
+            hostname: "".to_string(),
         }
     }
 }
