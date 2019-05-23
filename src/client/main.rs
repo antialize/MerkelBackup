@@ -1,3 +1,4 @@
+extern crate chrono;
 extern crate clap;
 extern crate crypto;
 extern crate hex;
@@ -11,6 +12,7 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 mod backup;
 mod shared;
+mod validate;
 use shared::{Config, Secrets};
 
 #[macro_use]
@@ -143,7 +145,15 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
             SubCommand::with_name("prune")
                 .about("Remove old roots, and then perform garbage collection"),
         )
-        .subcommand(SubCommand::with_name("validate").about("Validate all backed up content"))
+        .subcommand(
+            SubCommand::with_name("validate")
+                .arg(
+                    Arg::with_name("full")
+                        .long("full")
+                        .help("Also check that all files have the right content"),
+                )
+                .about("Validate all backed up content"),
+        )
         .subcommand(
             SubCommand::with_name("restore")
                 .about("restore backup files")
@@ -264,6 +274,7 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
                 panic!("No backup dirs specified");
             }
         }
+        Some("validate") => (),
         _ => panic!("No sub command"),
     }
 
@@ -283,6 +294,8 @@ fn main() {
 
     match matches.subcommand_name() {
         Some("backup") => backup::run(config, secrets),
-        _ => panic!("No sub command"),
+        Some("validate") => validate::run(config, secrets, matches.is_present("full")),
+        Some(n) => panic!("unknown subcommand {}", n),
+        None => panic!("No sub command",),
     }
 }
