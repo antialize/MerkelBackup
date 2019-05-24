@@ -38,7 +38,7 @@ impl Default for Config {
             encryption_key: "".to_string(),
             server: "".to_string(),
             recheck: false,
-            cache_db: "chace.db".to_string(),
+            cache_db: "cache.db".to_string(),
             hostname: "".to_string(),
         }
     }

@@ -401,7 +401,8 @@ fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> Re
         let time: i64 = t.2;
         let hash: String = t.3;
         if !ans.is_empty() {
-            ans.push('\x01');
+            ans.push('\0');
+            ans.push('\0');
         }
         ans.push_str(&format!("{}\0{}\0{}\0{}", id, host, time, hash));
     }
@@ -426,6 +427,10 @@ fn handle_put_root(
 
     if !check_hash(bucket.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
+    }
+
+    if host.contains('\0') {
+        return http_message(StatusCode::BAD_REQUEST, "Bad host name");
     }
 
     return Box::new(

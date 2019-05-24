@@ -119,7 +119,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
 
     // IF the file is empty we just do nothing
     if size == 0 {
-        return Some("".to_string());
+        return Some("empty".to_string());
     }
 
     // Check if we have allready checked the file once
@@ -150,7 +150,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     }
 
     // Open the file and read each chunk
-    let mut file = match fs::File::open(path) {
+    let mut file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) => {
             warn!("Unable to open file {:?}: {:?}", path, error);
@@ -216,11 +216,12 @@ fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> String {
     for ent in entries {
         if !ans.is_empty() {
             ans.push('\0');
+            ans.push('\0');
         }
         ans.push_str(&ent.name);
-        ans.push('\x01');
+        ans.push('\0');
         ans.push_str(&ent.type_);
-        ans.push('\x01');
+        ans.push('\0');
         ans.push_str(&ent.content);
     }
     return push_chunk(ans.as_bytes(), state);
@@ -372,7 +373,7 @@ pub fn run(config: Config, secrets: Secrets) {
         entries.push(DirEnt {
             name: dir.to_string(),
             type_: "dir".to_string(),
-            content: backup_folder(Path::new("/home/test/test"), &mut state).unwrap(),
+            content: backup_folder(Path::new(dir), &mut state).unwrap(),
         });
     }
 

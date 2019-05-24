@@ -85,7 +85,10 @@ pub fn run(config: Config, secrets: Secrets, full: bool) {
     let mut dir_stack: Vec<(String, String)> = Vec::new();
     let mut bad_dirs: usize = 0;
 
-    for row in res.text().expect("utf-8").split('\x01') {
+    for row in res.text().expect("utf-8").split("\0\0") {
+        if row.is_empty() {
+            continue;
+        }
         let ans: Vec<&str> = row.split('\0').collect();
         let _id = ans
             .get(0)
@@ -124,9 +127,12 @@ pub fn run(config: Config, secrets: Secrets, full: bool) {
                 Ok(v) => v,
             };
 
-            for row in v.split('\0') {
+            for row in v.split("\0\0") {
+                if row.is_empty() {
+                    continue;
+                }
                 if let Err(Error::Chunk(msg)) = (|| -> Result<(), Error> {
-                    let ans: Vec<&str> = row.split('\x01').collect();
+                    let ans: Vec<&str> = row.split('\0').collect();
                     let name = ans.get(0).ok_or(Error::Chunk("Missing name"))?;
                     let typ = ans.get(1).ok_or(Error::Chunk("Missing type"))?;
                     let reference = ans.get(2).ok_or(Error::Chunk("Missing reference"))?;
@@ -144,7 +150,7 @@ pub fn run(config: Config, secrets: Secrets, full: bool) {
                     return Ok(());
                 })() {
                     bad_dirs += 1;
-                    error!("Bad row in dir {} at path {}: {}", hash, path, msg);
+                    error!("Bad row '{}` in dir {} at path {}: {}", row, hash, path, msg);
                 }
             }
         }
@@ -156,6 +162,9 @@ pub fn run(config: Config, secrets: Secrets, full: bool) {
     let mut bad_files: usize = 0;
     for (hash, (idx, path)) in files.iter() {
         debug!("  File {}:{} : {}", path, idx, hash);
+        if hash == "empty" {
+            continue;
+        }
         if let Err(Error::Chunk(msg)) = get_chunk(&mut client, &config, &secrets, &hash) {
             bad_files += 1;
             error!("Bad file chunk {} at path {}:{} : {}", hash, path, idx, msg);
