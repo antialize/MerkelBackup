@@ -23,18 +23,13 @@ struct State {
     last_delete: i64,
 }
 
-fn push_chunk(content: &[u8], state: &mut State) -> String {
-    let mut hasher = Blake2b::new(256 / 8);
-    hasher.input(&state.secrets.seed);
-    hasher.input(content);
-    let hash = hasher.result_str().to_string();
-
+fn has_chunk(chunk: &str, state: &mut State) -> bool {
     let mut stmt = state
         .conn
         .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
         .unwrap();
     let cnt: i64 = stmt
-        .query(params![hash, state.last_delete])
+        .query(params![chunk, state.last_delete])
         .unwrap()
         .next()
         .unwrap()
@@ -42,14 +37,14 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         .get(0)
         .unwrap();
     if cnt == 1 {
-        return hash;
+        return true;
     }
 
     let url = format!(
         "{}/chunks/{}/{}",
         &state.config.server,
         hex::encode(&state.secrets.bucket),
-        &hash
+        &chunk
     );
     let res = state
         .client
@@ -57,13 +52,27 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         .basic_auth(&state.config.user, Some(&state.config.password))
         .send()
         .expect("Head failed");
-    let send = match res.status() {
-        reqwest::StatusCode::OK => false,
-        reqwest::StatusCode::NOT_FOUND => true,
+    match res.status() {
+        reqwest::StatusCode::OK => true,
+        reqwest::StatusCode::NOT_FOUND => false,
         code => panic!("Upload of chunk failed {:?}", code),
-    };
+    }
+}
 
-    if send {
+fn push_chunk(content: &[u8], state: &mut State) -> String {
+    let mut hasher = Blake2b::new(256 / 8);
+    hasher.input(&state.secrets.seed);
+    hasher.input(content);
+    let hash = hasher.result_str().to_string();
+
+    if !has_chunk(&hash, state) {
+        let url = format!(
+            "{}/chunks/{}/{}",
+            &state.config.server,
+            hex::encode(&state.secrets.bucket),
+            &hash
+        );
+
         let mut crypted = Vec::new();
         crypted.resize(content.len(), 0);
         crypto::chacha20::ChaCha20::new(&state.secrets.key, &state.secrets.iv[0..12])
@@ -105,35 +114,31 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
 
     // Check if we have allready checked the file once
     if !state.config.recheck {
-        let mut stmt = state
-            .conn
-            .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
-            .unwrap();
-        let mut rows = stmt
-            .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
-            .unwrap();
-        if let Some(row) = rows.next().unwrap() {
-            let s: String = row.get(0).expect("chunks should not be null");
-            let mut good = true;
+        let chunks: Option<String> = {
             let mut stmt = state
                 .conn
-                .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
+                .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
+                .unwrap();
+            let mut rows = stmt
+                .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
                 .unwrap();
 
+            if let Some(row) = rows.next().unwrap() {
+                Some(row.get(0).expect("chunks should not be null"))
+            } else {
+                None
+            }
+        };
+
+        if let Some(s) = chunks {
+            let mut good = true;
             for chunk in s.split(',') {
-                let cnt: i64 = stmt
-                    .query(params![chunk, state.last_delete])
-                    .unwrap()
-                    .next()
-                    .unwrap()
-                    .unwrap()
-                    .get(0)
-                    .unwrap();
-                if cnt == 0 {
+                if !has_chunk(chunk, state) {
                     good = false;
+                    break;
                 }
             }
-            if (good) {
+            if good {
                 return Some(s);
             }
         }
