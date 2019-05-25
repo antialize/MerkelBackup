@@ -20,6 +20,7 @@ struct State {
     scan: bool,
     transfer_bytes: u64,
     progress: Option<ProgressBar<std::io::Stdout>>,
+    last_delete: i64,
 }
 
 fn push_chunk(content: &[u8], state: &mut State) -> String {
@@ -27,6 +28,22 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
     hasher.input(&state.secrets.seed);
     hasher.input(content);
     let hash = hasher.result_str().to_string();
+
+    let mut stmt = state
+        .conn
+        .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
+        .unwrap();
+    let cnt: i64 = stmt
+        .query(params![hash, state.last_delete])
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    if cnt == 1 {
+        return hash;
+    }
 
     let url = format!(
         "{}/chunks/{}/{}",
@@ -64,6 +81,12 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         }
     }
 
+    let mut stmt = state
+        .conn
+        .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")
+        .unwrap();
+    stmt.query(params![hash]).unwrap();
+
     if let Some(p) = &mut state.progress {
         p.add(content.len() as u64);
     }
@@ -89,13 +112,30 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
         let mut rows = stmt
             .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
             .unwrap();
-        match rows.next().expect("Unable to read db row") {
-            Some(row) => {
-                let s: String = row.get(0).expect("chunks should not be null");
-                //debug!("Skipping file {:?}: {}", path, &s);
+        if let Some(row) = rows.next().unwrap() {
+            let s: String = row.get(0).expect("chunks should not be null");
+            let mut good = true;
+            let mut stmt = state
+                .conn
+                .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
+                .unwrap();
+
+            for chunk in s.split(',') {
+                let cnt: i64 = stmt
+                    .query(params![chunk, state.last_delete])
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .get(0)
+                    .unwrap();
+                if cnt == 0 {
+                    good = false;
+                }
+            }
+            if (good) {
                 return Some(s);
             }
-            None => (),
         }
     }
 
@@ -290,6 +330,15 @@ pub fn run(config: Config, secrets: Secrets) {
             NO_PARAMS,
         )
         .expect("Unable to create cache table");
+
+        conn.execute(
+            "create table if not exists remote (
+                chunk text not null unique,
+                time integer not null
+            )",
+            NO_PARAMS,
+        )
+        .expect("Unable to create cache table");
     }
 
     let mut state = State {
@@ -300,7 +349,27 @@ pub fn run(config: Config, secrets: Secrets) {
         scan: true,
         transfer_bytes: 0,
         progress: None,
+        last_delete: 0,
     };
+
+    {
+        let url = format!(
+            "{}/status/{}",
+            &state.config.server,
+            hex::encode(&state.secrets.bucket)
+        );
+        let mut res = state
+            .client
+            .get(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+            .expect("Head failed");
+
+        if res.status() != reqwest::StatusCode::OK {
+            panic!("Uanble to get status, {}", res.status());
+        }
+        state.last_delete = res.text().expect("utf-8").parse().expect("Bad time");
+    }
 
     let dirs = state.config.backup_dirs.clone();
     for dir in dirs.iter() {

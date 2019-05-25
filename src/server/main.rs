@@ -334,14 +334,23 @@ fn handle_delete_chunk(
     if !check_hash(chunk.as_ref()) {
         return http_message(StatusCode::BAD_REQUEST, "Bad chunk");
     }
-    match state.conn.lock().unwrap().execute(
+    let conn = state.conn.lock().unwrap();
+    match conn.execute(
         "DELETE FROM chunks WHERE bucket=? AND hash=?",
         params![bucket, chunk],
     ) {
         Err(_) => return http_message(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
         Ok(0) => return http_message(StatusCode::NOT_FOUND, "Not found"),
+        Ok(_) => (),
+    };
+
+    match conn.execute(
+        "REPLACE INTO VALUES (?, strftime('%s', 'now'))",
+        params![bucket],
+    ) {
+        Err(_) => return http_message(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
         Ok(_) => return http_message(StatusCode::OK, ""),
-    }
+    };
 }
 
 fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
@@ -365,6 +374,34 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
         let (chunk, size): (String, i64) = row.unwrap();
         ans.push_str(&format!("{} {}\n", chunk, size));
     }
+    Box::new(future::ok(
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(ans))
+            .unwrap(),
+    ))
+}
+
+fn handle_get_status(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Get) {
+        warn!("Unauthorized access for list chunks {}", bucket);
+        return res;
+    }
+    if !check_hash(bucket.as_ref()) {
+        return http_message(StatusCode::BAD_REQUEST, "Bad bucket");
+    }
+
+    let conn = state.conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT time FROM deletes WHERE bucket=?")
+        .unwrap();
+
+    let mut rows = stmt.query(params![bucket]).unwrap();
+    let time: i64 = match rows.next().expect("Unable to read db row") {
+        Some(row) => row.get(0).expect("Unable to get number"),
+        None => 0,
+    };
+    let ans = format!("{}", time);
     Box::new(future::ok(
         Response::builder()
             .status(StatusCode::OK)
@@ -483,7 +520,9 @@ fn handle_delete_root(
 
 fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req.uri().path().split("/").map(|v| v.to_string()).collect();
-    if req.method() == &Method::GET && path.len() == 4 && path[1] == "chunks" {
+    if req.method() == &Method::GET && path.len() == 3 && path[1] == "status" {
+        return handle_get_status(path[2].clone(), req, state);
+    } else if req.method() == &Method::GET && path.len() == 4 && path[1] == "chunks" {
         return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false);
     } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "chunks" {
         return handle_put_chunk(path[2].clone(), path[3].clone(), req, state);
@@ -547,6 +586,16 @@ fn setup_db(conf: &Config) -> Connection {
         NO_PARAMS,
     )
     .expect("Unable to create cache table");
+
+    trace!("Creating deletes table");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deletes (
+             bucket TEXT NOT NULL UNIQUE,
+             time INTEGER NOT NULL
+             )",
+        NO_PARAMS,
+    )
+    .expect("Unable to deletes cache table");
 
     return conn;
 }
