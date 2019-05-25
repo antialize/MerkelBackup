@@ -3,7 +3,7 @@ use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
 use rusqlite::{params, Connection, Statement, NO_PARAMS};
-use shared::{Config, Secrets};
+use shared::{check_response, Config, Error, Secrets};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -26,18 +26,15 @@ struct State<'a> {
     update_chunks_stmt: Statement<'a>,
 }
 
-fn has_chunk(chunk: &str, state: &mut State) -> bool {
+fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
     let cnt: i64 = state
         .has_remote_stmt
-        .query(params![chunk, state.last_delete])
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .get(0)
-        .unwrap();
+        .query(params![chunk, state.last_delete])?
+        .next()?
+        .ok_or(Error::MissingRow())?
+        .get(0)?;
     if cnt == 1 {
-        return true;
+        return Ok(true);
     }
 
     let url = format!(
@@ -50,22 +47,21 @@ fn has_chunk(chunk: &str, state: &mut State) -> bool {
         .client
         .head(&url[..])
         .basic_auth(&state.config.user, Some(&state.config.password))
-        .send()
-        .expect("Head failed");
+        .send()?;
     match res.status() {
-        reqwest::StatusCode::OK => true,
-        reqwest::StatusCode::NOT_FOUND => false,
-        code => panic!("Upload of chunk failed {:?}", code),
+        reqwest::StatusCode::OK => Ok(true),
+        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        code => Err(Error::HttpStatus(code)),
     }
 }
 
-fn push_chunk(content: &[u8], state: &mut State) -> String {
+fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     let mut hasher = Blake2b::new(256 / 8);
     hasher.input(&state.secrets.seed);
     hasher.input(content);
     let hash = hasher.result_str().to_string();
 
-    if !has_chunk(&hash, state) {
+    if !has_chunk(&hash, state)? {
         let url = format!(
             "{}/chunks/{}/{}",
             &state.config.server,
@@ -78,75 +74,68 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         crypto::chacha20::ChaCha20::new(&state.secrets.key, &state.secrets.iv[0..12])
             .process(content, &mut crypted);
 
-        let res = state
-            .client
-            .put(&url[..])
-            .basic_auth(&state.config.user, Some(&state.config.password))
-            .body(reqwest::Body::from(crypted))
-            .send()
-            .expect("Send failed");
-        if res.status() != reqwest::StatusCode::OK {
-            panic!("Upload of chunk failed {:?}", res.status())
-        }
+        check_response(
+            state
+                .client
+                .put(&url[..])
+                .basic_auth(&state.config.user, Some(&state.config.password))
+                .body(reqwest::Body::from(crypted))
+                .send()?,
+        )?;
     }
 
-    state.update_remote_stmt.execute(params![hash]).unwrap();
+    state.update_remote_stmt.execute(params![hash])?;
 
     if let Some(p) = &mut state.progress {
         p.add(content.len() as u64);
     }
-    return hash;
+    return Ok(hash);
 }
 
-fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<String> {
+fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<String, Error> {
+    let path_str = path.to_str().ok_or(Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
-        p.message(path.to_str().unwrap_or(""))
+        p.message(path_str);
     }
 
     // IF the file is empty we just do nothing
     if size == 0 {
-        return Some("empty".to_string());
+        return Ok("empty".to_string());
     }
 
     // Check if we have allready checked the file once
     if !state.config.recheck {
         let chunks: Option<String> = {
-            let mut rows = state
-                .get_chunks_stmt
-                .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
-                .unwrap();
-            match rows.next().unwrap() {
-                Some(row) => row.get(0).unwrap(),
+            let mut rows =
+                state
+                    .get_chunks_stmt
+                    .query(params![path_str, size as i64, mtime as i64])?;
+            match rows.next()? {
+                Some(row) => row.get(0)?,
                 None => None,
             }
         };
         if let Some(chunks) = chunks {
             let mut good = true;
             for chunk in chunks.split(',') {
-                if !has_chunk(chunk, state) {
+                if !has_chunk(chunk, state)? {
                     good = false;
                     break;
                 }
             }
             if good {
-                return Some(chunks);
+                return Ok(chunks);
             }
         }
     }
 
     if state.scan {
         state.transfer_bytes += size;
-        return Some("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
+        return Ok("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
     }
 
     // Open the file and read each chunk
-    let mut file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) => {
-            warn!("Unable to open file {:?}: {:?}", path, error);
-            return None;
-        }
-    };
+    let mut file = fs::File::open(&path)?;
 
     let mut buffer: Vec<u8> = Vec::new();
     buffer.resize(u64::min(size, CHUNK_SIZE) as usize, 0);
@@ -154,13 +143,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     loop {
         let mut used = 0;
         while used < buffer.len() {
-            let w = match file.read(&mut buffer[used..]) {
-                Ok(w) => w,
-                Err(error) => {
-                    warn!("Unable to read from {:?}: {:?}", path, error);
-                    return None;
-                }
-            };
+            let w = file.read(&mut buffer[used..])?;
             if w == 0 {
                 break;
             }
@@ -173,7 +156,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
         if chunks.len() != 0 {
             chunks.push_str(&",");
         }
-        chunks.push_str(&push_chunk(&buffer[..used], state));
+        chunks.push_str(&push_chunk(&buffer[..used], state)?);
 
         if used != buffer.len() {
             break;
@@ -182,17 +165,14 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
 
     //TODO check if the mtime has changed while we where pushing
 
-    state
-        .update_chunks_stmt
-        .execute(params![
-            &path.to_str().unwrap(),
-            size as i64,
-            mtime as i64,
-            &chunks
-        ])
-        .expect("insert failed");
+    state.update_chunks_stmt.execute(params![
+        &path.to_str().unwrap(),
+        size as i64,
+        mtime as i64,
+        &chunks
+    ])?;
 
-    return Some(chunks);
+    return Ok(chunks);
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -202,7 +182,7 @@ struct DirEnt {
     content: String,
 }
 
-fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> String {
+fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<String, Error> {
     entries.sort();
     let mut ans = "".to_string();
     for ent in entries {
@@ -230,73 +210,37 @@ fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
     return ans as u64;
 }
 
-fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
-    let raw_entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            warn!("Unable to list dir {:?}: {:?}", dir, error);
-            return None;
-        }
-    };
-
+fn backup_folder(dir: &Path, state: &mut State) -> Result<String, Error> {
+    let raw_entries = fs::read_dir(dir)?;
     let mut entries: Vec<DirEnt> = Vec::new();
-
     for entry in raw_entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                warn!("Unable to read dir entry in {:?}: {:?}", dir, error);
-                continue;
-            }
-        };
-        let path = entry.path();
-        let md = match fs::metadata(&path) {
-            Ok(md) => md,
-            Err(error) => {
-                warn!("Unable to read md for {:?}: {:?}", path, error);
-                continue;
-            }
-        };
-        let filename = match path.file_name().unwrap().to_str() {
-            Some(n) => n,
-            None => {
-                warn!("Bad file name for {:?}", path);
-                continue;
-            }
-        };
+        let path = entry?.path();
+        let md = fs::metadata(&path)?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
+            .to_str()
+            .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
         if filename.contains("\0") || filename.contains("\x01") {
-            warn!("Bad file name for {:?}", path);
-            continue;
+            return Err(Error::BadPath(path.to_path_buf()));
         }
 
         if md.is_dir() {
-            match backup_folder(&path, state) {
-                Some(chunks) => entries.push(DirEnt {
-                    name: filename.to_string(),
-                    type_: "dir".to_string(),
-                    content: chunks,
-                }),
-                None => continue,
-            }
+            entries.push(DirEnt {
+                name: filename.to_string(),
+                type_: "dir".to_string(),
+                content: backup_folder(&path, state)?,
+            });
         } else if md.is_file() {
-            let mtime = match md.modified() {
-                Ok(mtime) => mtime
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                Err(error) => {
-                    warn!("Unable to read mtime for {:?}: {:?}", path, error);
-                    continue;
-                }
-            };
-            let chunks = match backup_file(&path, md.len(), mtime, state) {
-                Some(chunks) => chunks,
-                None => continue,
-            };
+            let mtime = md
+                .modified()?
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             entries.push(DirEnt {
                 name: filename.to_string(),
                 type_: "file".to_string(),
-                content: chunks,
+                content: backup_file(&path, md.len(), mtime, state)?,
             });
         } else {
 
@@ -304,54 +248,34 @@ fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
     }
     if state.scan {
         state.transfer_bytes += bytes_ents(entries);
-        return Some("00000000000000000000000000000000".to_string());
+        return Ok("00000000000000000000000000000000".to_string());
     } else {
-        return Some(push_ents(entries, state));
+        return push_ents(entries, state);
     }
 }
 
-pub fn run(config: Config, secrets: Secrets) {
-    let conn = Connection::open(&config.cache_db).expect("Unable to open hash cache");
-    {
-        conn.pragma_update(None, "journal_mode", &"WAL".to_string())
-            .expect("Cannot enable wal");
+pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let conn = Connection::open(&config.cache_db)?;
 
-        conn.execute(
-            "create table if not exists files (
-                path text not null unique,
-                size integer not null,
-                mtime integer not null,
-                chunks text not null
-            )",
-            NO_PARAMS,
-        )
-        .expect("Unable to create cache table");
+    conn.pragma_update(None, "journal_mode", &"WAL".to_string())?;
 
-        conn.execute(
-            "create table if not exists remote (
-                chunk text not null unique,
-                time integer not null
-            )",
-            NO_PARAMS,
-        )
-        .expect("Unable to create cache table");
-    }
+    conn.execute(
+        "create table if not exists files (
+            path text not null unique,
+            size integer not null,
+            mtime integer not null,
+            chunks text not null
+        )",
+        NO_PARAMS,
+    )?;
 
-    let has_remote_stmt = conn
-        .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
-        .unwrap();
-
-    let update_remote_stmt = conn
-        .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")
-        .unwrap();
-
-    let get_chunks_stmt = conn
-        .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
-        .unwrap();
-
-    let update_chunks_stmt = conn
-        .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")
-        .unwrap();
+    conn.execute(
+        "create table if not exists remote (
+            chunk text not null unique,
+            time integer not null
+        )",
+        NO_PARAMS,
+    )?;
 
     let mut state = State {
         secrets,
@@ -361,10 +285,14 @@ pub fn run(config: Config, secrets: Secrets) {
         transfer_bytes: 0,
         progress: None,
         last_delete: 0,
-        has_remote_stmt,
-        update_remote_stmt,
-        get_chunks_stmt,
-        update_chunks_stmt,
+        has_remote_stmt: conn
+            .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")?,
+        update_remote_stmt: conn
+            .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")?,
+        get_chunks_stmt: conn
+            .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
+        update_chunks_stmt: conn
+            .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
     };
 
     {
@@ -373,23 +301,22 @@ pub fn run(config: Config, secrets: Secrets) {
             &state.config.server,
             hex::encode(&state.secrets.bucket)
         );
-        let mut res = state
-            .client
-            .get(&url[..])
-            .basic_auth(&state.config.user, Some(&state.config.password))
-            .send()
-            .expect("Head failed");
 
-        if res.status() != reqwest::StatusCode::OK {
-            panic!("Uanble to get status, {}", res.status());
-        }
-        state.last_delete = res.text().expect("utf-8").parse().expect("Bad time");
+        state.last_delete = check_response(
+            state
+                .client
+                .get(&url[..])
+                .basic_auth(&state.config.user, Some(&state.config.password))
+                .send()?,
+        )?
+        .text()?
+        .parse()?
     }
 
     let dirs = state.config.backup_dirs.clone();
     for dir in dirs.iter() {
         info!("Scanning {}", &dir);
-        backup_folder(Path::new(dir), &mut state).unwrap();
+        backup_folder(Path::new(dir), &mut state)?;
     }
 
     state.progress = Some({
@@ -406,12 +333,12 @@ pub fn run(config: Config, secrets: Secrets) {
         entries.push(DirEnt {
             name: dir.to_string(),
             type_: "dir".to_string(),
-            content: backup_folder(Path::new(dir), &mut state).unwrap(),
+            content: backup_folder(Path::new(dir), &mut state)?,
         });
     }
 
     info!("Storing root");
-    let root = push_ents(entries, &mut state);
+    let root = push_ents(entries, &mut state)?;
 
     let url = format!(
         "{}/roots/{}/{}",
@@ -420,14 +347,13 @@ pub fn run(config: Config, secrets: Secrets) {
         &state.config.hostname
     );
 
-    let res = state
-        .client
-        .put(&url[..])
-        .basic_auth(&state.config.user, Some(&state.config.password))
-        .body(root)
-        .send()
-        .expect("Send failed");
-    if res.status() != reqwest::StatusCode::OK {
-        panic!("Put root failed {}", res.status())
-    }
+    check_response(
+        state
+            .client
+            .put(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .body(root)
+            .send()?,
+    )?;
+    Ok(())
 }

@@ -14,7 +14,7 @@ use crypto::digest::Digest;
 mod backup;
 mod shared;
 mod visit;
-use shared::{Config, Secrets};
+use shared::{Config, Error, Secrets};
 
 #[macro_use]
 extern crate log;
@@ -66,7 +66,7 @@ fn derive_secrets(password: &str) -> Secrets {
     secrets
 }
 
-fn parse_config() -> (Config, ArgMatches<'static>) {
+fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
     let matches = App::new("mbackup client")
         .version("0.1")
         .about("A client for mbackup")
@@ -193,22 +193,7 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
         .get_matches();
 
     let mut config: Config = match matches.value_of("config") {
-        Some(path) => {
-            let data = match std::fs::read_to_string(path) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("Unable to open config file {}: {:?}", path, e);
-                    std::process::exit(1)
-                }
-            };
-            match toml::from_str(&data) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    error!("Unable to parse config file {}: {:?}", path, e);
-                    std::process::exit(1)
-                }
-            }
-        }
+        Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
         None => Config {
             ..Default::default()
         },
@@ -221,7 +206,7 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
         Some("info") => config.verbosity = log::LevelFilter::Info,
         Some("debug") => config.verbosity = log::LevelFilter::Debug,
         Some("trace") => config.verbosity = log::LevelFilter::Trace,
-        Some(v) => panic!("Unknown log level {}", v),
+        Some(_) => return Err(Error::Msg("Unknown log level")),
         None => (),
     }
 
@@ -229,28 +214,28 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
         config.user = v.to_string();
     }
     if config.user.is_empty() {
-        panic!("No user specified");
+        return Err(Error::Msg("No user specified"));
     }
 
     if let Some(v) = matches.value_of("password") {
         config.password = v.to_string();
     }
     if config.password.is_empty() {
-        panic!("No password specified");
+        return Err(Error::Msg("No password specified"));
     }
 
     if let Some(v) = matches.value_of("encryption_key") {
         config.encryption_key = v.to_string();
     }
     if config.encryption_key.is_empty() {
-        panic!("No encryption key specified");
+        return Err(Error::Msg("No encryption key specified"));
     }
 
     if let Some(v) = matches.value_of("server") {
         config.server = v.to_string();
     }
     if config.server.is_empty() {
-        panic!("No server specified");
+        return Err(Error::Msg("No servers pecified"));
     }
 
     match matches.subcommand_name() {
@@ -263,35 +248,36 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
                 config.cache_db = v.to_string();
             }
             if config.cache_db.is_empty() {
-                panic!("No cache_db specified");
+                return Err(Error::Msg("No cache_db specified"));
             }
 
             if let Some(v) = matches.value_of("hostname") {
                 config.hostname = v.to_string();
             }
             if config.hostname.is_empty() {
-                panic!("No host name specified");
+                return Err(Error::Msg("No host name specified"));
             }
 
             if let Some(v) = matches.values_of("dir") {
                 config.backup_dirs = v.map(|v| v.to_string()).collect();
             }
             if config.backup_dirs.is_empty() {
-                panic!("No backup dirs specified");
+                return Err(Error::Msg("No backup dirs specified"));
             }
         }
         Some("validate") => (),
         Some("prune") => (),
-        _ => panic!("No sub command"),
+        _ => return Err(Error::Msg("No sub command specified")),
     }
 
-    return (config, matches);
+    return Ok((config, matches));
 }
 
-fn main() {
-    simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
+fn main() -> Result<(), Error> {
+    simple_logger::init_with_level(log::Level::Trace)
+        .map_err(|_| Error::Msg("Unable to init log"))?;
 
-    let (config, matches) = parse_config();
+    let (config, matches) = parse_config()?;
     log::set_max_level(config.verbosity);
     debug!("Config {:?}", config);
 

@@ -3,16 +3,12 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
-use shared::{Config, Secrets};
+use shared::{check_response, Config, Error, Secrets};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
 use std::time::SystemTime;
-
-enum Error {
-    Chunk(&'static str),
-}
 
 fn get_chunk(
     client: &mut reqwest::Client,
@@ -27,20 +23,16 @@ fn get_chunk(
         &hash
     );
 
-    let mut res = client
-        .get(&url[..])
-        .basic_auth(&config.user, Some(&config.password))
-        .send()
-        .map_err(|_| Error::Chunk("Failed to send request"))?;
-
-    if res.status() != reqwest::StatusCode::OK {
-        return Err(Error::Chunk("Invalid status code"));
-    }
+    let mut res = check_response(
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()?,
+    )?;
 
     let len = res.content_length().unwrap_or(0);
     let mut encrypted = Vec::with_capacity(len as usize);
-    res.read_to_end(&mut encrypted)
-        .map_err(|_| Error::Chunk("Failed to read responce"))?;
+    res.read_to_end(&mut encrypted)?;
 
     let mut content = Vec::with_capacity(encrypted.len());
     content.resize(encrypted.len(), 0);
@@ -52,7 +44,7 @@ fn get_chunk(
     hasher.input(&content);
 
     if hasher.result_str() != hash {
-        return Err(Error::Chunk("Invalid hash"));
+        return Err(Error::InvalidHash());
     }
 
     return Ok(content);
@@ -64,8 +56,9 @@ fn get_chunk_utf8(
     secrets: &Secrets,
     hash: &str,
 ) -> Result<String, Error> {
-    String::from_utf8(get_chunk(client, config, secrets, hash)?)
-        .map_err(|_| Error::Chunk("Not utf8"))
+    Ok(String::from_utf8(get_chunk(
+        client, config, secrets, hash,
+    )?)?)
 }
 
 pub enum Mode {
@@ -74,20 +67,17 @@ pub enum Mode {
     Recover { path: String, dry: bool },
 }
 
-pub fn run(config: Config, secrets: Secrets, mode: Mode) {
+pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
     let mut client = reqwest::Client::new();
 
     let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
 
-    let mut res = client
-        .get(&url[..])
-        .basic_auth(&config.user, Some(&config.password))
-        .send()
-        .expect("Send failed");
-
-    if res.status() != reqwest::StatusCode::OK {
-        panic!("Unable to get roots")
-    }
+    let mut res = check_response(
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()?,
+    )?;
 
     let mut files: HashMap<String, (usize, String)> = HashMap::new();
     let mut dirs: HashMap<String, String> = HashMap::new();
@@ -95,8 +85,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
     let mut bad_dirs: usize = 0;
 
     let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
     for row in res.text().expect("utf-8").split("\0\0") {
@@ -104,18 +93,10 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
             continue;
         }
         let ans: Vec<&str> = row.split('\0').collect();
-        let id = ans
-            .get(0)
-            .expect("Missing id")
-            .parse::<u64>()
-            .expect("Bad id");
+        let id = ans.get(0).ok_or(Error::MissingRow())?.parse::<u64>()?;
         let host = ans.get(1).expect("Missing host");
-        let time = ans
-            .get(2)
-            .expect("Missing time")
-            .parse::<i64>()
-            .expect("Bad time");
-        let hash = ans.get(3).expect("Missing hash");
+        let time = ans.get(2).ok_or(Error::MissingRow())?.parse::<i64>()?;
+        let hash = ans.get(3).ok_or(Error::MissingRow())?;
         dir_stack.push((
             format!("{}_{}", host, NaiveDateTime::from_timestamp(time, 0)),
             hash.to_string(),
@@ -138,14 +119,12 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
                             hex::encode(&secrets.bucket),
                             id
                         );
-                        let mut res = client
-                            .delete(&url[..])
-                            .basic_auth(&config.user, Some(&config.password))
-                            .send()
-                            .expect("Send failed");
-                        if res.status() != reqwest::StatusCode::OK {
-                            panic!("Delete of root failed {:?}", res.status())
-                        }
+                        check_response(
+                            client
+                                .delete(&url[..])
+                                .basic_auth(&config.user, Some(&config.password))
+                                .send()?,
+                        )?;
                     }
                     continue;
                 }
@@ -165,9 +144,9 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
             debug!("  Dir {}", path);
 
             let v = match get_chunk_utf8(&mut client, &config, &secrets, &hash) {
-                Err(Error::Chunk(msg)) => {
+                Err(e) => {
                     bad_dirs += 1;
-                    error!("Bad dir {} at path {}: {}", hash, path, msg);
+                    error!("Bad dir {} at path {}: {:?}", hash, path, e);
                     continue;
                 }
                 Ok(v) => v,
@@ -177,28 +156,28 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
                 if row.is_empty() {
                     continue;
                 }
-                if let Err(Error::Chunk(msg)) = (|| -> Result<(), Error> {
-                    let ans: Vec<&str> = row.split('\0').collect();
-                    let name = ans.get(0).ok_or(Error::Chunk("Missing name"))?;
-                    let typ = ans.get(1).ok_or(Error::Chunk("Missing type"))?;
-                    let reference = ans.get(2).ok_or(Error::Chunk("Missing reference"))?;
+                if let Err(e) = (|| -> Result<(), Error> {
+                    let mut ans = row.split('\0');
+                    let name = ans.next().ok_or(Error::Msg("Missing name"))?;
+                    let typ = ans.next().ok_or(Error::Msg("Missing type"))?;
+                    let reference = ans.next().ok_or(Error::Msg("Missing reference"))?;
                     let path = format!("{}/{}", &path, &name);
                     match typ {
-                        &"dir" => dir_stack.push((path, reference.to_string())),
-                        &"file" => {
+                        "dir" => dir_stack.push((path, reference.to_string())),
+                        "file" => {
                             for (idx, hash) in reference.split(",").enumerate() {
                                 files.entry(hash.to_string()).or_insert((idx, path.clone()));
                             }
                         }
-                        &"link" => (),
-                        _ => return Err(Error::Chunk("Unknown type")),
+                        "link" => (),
+                        _ => return Err(Error::Msg("Unknown type")),
                     }
                     return Ok(());
                 })() {
                     bad_dirs += 1;
                     error!(
-                        "Bad row '{}` in dir {} at path {}: {}",
-                        row, hash, path, msg
+                        "Bad row '{}` in dir {} at path {}: {:?}",
+                        row, hash, path, e
                     );
                 }
             }
@@ -209,19 +188,18 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
 
     match mode {
         Mode::Validate { full } => {
-            if full {
+            if true || full {
                 let mut pb = ProgressBar::new(files.len() as u64);
                 pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
                 let mut bad_files: usize = 0;
                 for (hash, (idx, path)) in files.iter() {
-                    pb.message(&format!("{}:{}", path, idx));;
+                    pb.message(&format!("{}:{}", path, idx));
                     if hash == "empty" {
                         continue;
                     }
-                    if let Err(Error::Chunk(msg)) = get_chunk(&mut client, &config, &secrets, &hash)
-                    {
+                    if let Err(e) = get_chunk(&mut client, &config, &secrets, &hash) {
                         bad_files += 1;
-                        error!("Bad file chunk {} at path {}:{} : {}", hash, path, idx, msg);
+                        error!("Bad file chunk {} at path {}:{} : {:?}", hash, path, idx, e);
                     }
                     pb.inc();
                 }
@@ -231,58 +209,41 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
         Mode::Prune { dry } => {
             let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
-            let mut res = client
-                .get(&url[..])
-                .basic_auth(&config.user, Some(&config.password))
-                .send()
-                .expect("Send failed");
-
-            if res.status() != reqwest::StatusCode::OK {
-                panic!("Unable to get roots")
-            }
-
-            let content = res.text().expect("utf-8");
+            let mut content = check_response(
+                client
+                    .get(&url[..])
+                    .basic_auth(&config.user, Some(&config.password))
+                    .send()?,
+            )?
+            .text()?;
 
             let mut total = 0;
-            let mut totalSize = 0;
-            let mut removeSize = 0;
+            let mut removed_size = 0;
             let mut remove = Vec::new();
             for row in content.split("\n") {
                 if row.is_empty() {
                     continue;
                 }
                 let mut row = row.split(" ");
-                let chunk = match row.next() {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let size = match row.next() {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let size = match size.parse::<u64>() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
+                let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
+                let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                 total += 1;
-                totalSize += size;
                 if files.contains_key(chunk) {
                     continue;
                 }
                 if dirs.contains_key(chunk) {
                     continue;
                 }
-                removeSize += size;
+                removed_size += size;
                 remove.push((chunk, size));
             }
 
             info!("Removing {} of {} chunks", remove.len(), total);
             if dry {
-                return;
+                return Ok(());
             }
 
-            let mut pb = ProgressBar::new(removeSize);
+            let mut pb = ProgressBar::new(removed_size);
             pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
             pb.set_units(pbr::Units::Bytes);
             for (idx, (chunk, size)) in remove.iter().enumerate() {
@@ -295,19 +256,18 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) {
                     chunk
                 );
 
-                let mut res = client
-                    .delete(&url[..])
-                    .basic_auth(&config.user, Some(&config.password))
-                    .send()
-                    .expect("Send failed");
+                check_response(
+                    client
+                        .delete(&url[..])
+                        .basic_auth(&config.user, Some(&config.password))
+                        .send()?,
+                )?;
 
-                if res.status() != reqwest::StatusCode::OK {
-                    panic!("Delete of chunk failed {:?}", res.status())
-                }
                 pb.add(*size);
             }
             pb.finish();
         }
         Mode::Recover { dry, path } => {}
     }
+    Ok(())
 }
