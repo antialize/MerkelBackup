@@ -2,6 +2,7 @@ extern crate chrono;
 extern crate clap;
 extern crate crypto;
 extern crate hex;
+extern crate pbr;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
@@ -12,7 +13,7 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 mod backup;
 mod shared;
-mod validate;
+mod visit;
 use shared::{Config, Secrets};
 
 #[macro_use]
@@ -143,6 +144,11 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
         )
         .subcommand(
             SubCommand::with_name("prune")
+                .arg(
+                    Arg::with_name("dry")
+                        .long("dry")
+                        .help("Don't actually remove anything"),
+                )
                 .about("Remove old roots, and then perform garbage collection"),
         )
         .subcommand(
@@ -275,6 +281,7 @@ fn parse_config() -> (Config, ArgMatches<'static>) {
             }
         }
         Some("validate") => (),
+        Some("prune") => (),
         _ => panic!("No sub command"),
     }
 
@@ -294,7 +301,20 @@ fn main() {
 
     match matches.subcommand_name() {
         Some("backup") => backup::run(config, secrets),
-        Some("validate") => validate::run(config, secrets, matches.is_present("full")),
+        Some("validate") => visit::run(
+            config,
+            secrets,
+            visit::Mode::Validate {
+                full: matches.is_present("full"),
+            },
+        ),
+        Some("prune") => visit::run(
+            config,
+            secrets,
+            visit::Mode::Prune {
+                dry: matches.is_present("dry"),
+            },
+        ),
         Some(n) => panic!("unknown subcommand {}", n),
         None => panic!("No sub command",),
     }

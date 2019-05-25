@@ -355,16 +355,15 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
     let mut ans = "".to_string();
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT hash FROM chunks WHERE bucket=?")
+        .prepare("SELECT hash, size FROM chunks WHERE bucket=?")
         .unwrap();
 
     for row in stmt
-        .query_map(params![bucket], |row| Ok(row.get(0)?))
+        .query_map(params![bucket], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
     {
-        let row: String = row.unwrap();
-        ans.push_str(&row);
-        ans.push('\n');
+        let (chunk, size): (String, i64) = row.unwrap();
+        ans.push_str(&format!("{} {}\n", chunk, size));
     }
     Box::new(future::ok(
         Response::builder()

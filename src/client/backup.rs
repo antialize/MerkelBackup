@@ -1,16 +1,14 @@
-extern crate reqwest;
-extern crate rusqlite;
-
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
+use pbr::ProgressBar;
 use rusqlite::{params, Connection, NO_PARAMS};
+use shared::{Config, Secrets};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 use std::time::SystemTime;
-
-use shared::{Config, Secrets};
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -20,46 +18,8 @@ struct State {
     conn: Connection,
     client: reqwest::Client,
     scan: bool,
-    current_bytes: u64,
-    current_files: u64,
-    current_folders: u64,
     transfer_bytes: u64,
-    transfer_files: u64,
-    total_files: u64,
-    total_folders: u64,
-    total_bytes: u64,
-    last_progress_time: std::time::Instant,
-}
-
-fn emit_progress(state: &mut State) {
-    let now = std::time::Instant::now();
-    if now.duration_since(state.last_progress_time).as_millis() < 500 {
-        return;
-    }
-    if state.scan {
-        info!(
-            "Scanning: {} folders, {}/{} files, {}/{} Mb",
-            state.total_folders,
-            state.transfer_files,
-            state.total_files,
-            state.transfer_bytes / 1024 / 1024,
-            state.total_bytes / 1024 / 1024
-        );
-    } else {
-        info!(
-            "Backing up: {} / {} folders, {}/{}/{} files, {}/{}/{} Mb",
-            state.current_folders,
-            state.total_folders,
-            state.current_files,
-            state.transfer_files,
-            state.total_files,
-            state.current_bytes / 1024 / 1024,
-            state.transfer_bytes / 1024 / 1024,
-            state.total_bytes / 1024 / 1024
-        );
-    }
-
-    state.last_progress_time = now;
+    progress: Option<ProgressBar<std::io::Stdout>>,
 }
 
 fn push_chunk(content: &[u8], state: &mut State) -> String {
@@ -104,18 +64,16 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         }
     }
 
-    state.current_bytes += content.len() as u64;
-    emit_progress(state);
+    if let Some(p) = &mut state.progress {
+        p.add(content.len() as u64);
+    }
     return hash;
 }
 
 fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<String> {
-    if state.scan {
-        state.total_files += 1;
-        state.total_bytes += size;
+    if let Some(p) = &mut state.progress {
+        p.message(path.to_str().unwrap_or(""))
     }
-
-    emit_progress(state);
 
     // IF the file is empty we just do nothing
     if size == 0 {
@@ -142,11 +100,8 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     }
 
     if state.scan {
-        state.transfer_files += 1;
         state.transfer_bytes += size;
         return Some("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
-    } else {
-        state.current_files += 1;
     }
 
     // Open the file and read each chunk
@@ -239,12 +194,6 @@ fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
 }
 
 fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
-    if state.scan {
-        state.total_folders += 1;
-    } else {
-        state.current_folders += 1;
-    }
-    emit_progress(state);
     let raw_entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -317,7 +266,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Option<String> {
         }
     }
     if state.scan {
-        state.total_bytes += bytes_ents(entries);
+        state.transfer_bytes += bytes_ents(entries);
         return Some("00000000000000000000000000000000".to_string());
     } else {
         return Some(push_ents(entries, state));
@@ -349,15 +298,8 @@ pub fn run(config: Config, secrets: Secrets) {
         conn: conn,
         client: reqwest::Client::new(),
         scan: true,
-        current_bytes: 0,
-        current_files: 0,
-        current_folders: 0,
         transfer_bytes: 0,
-        transfer_files: 0,
-        total_files: 0,
-        total_folders: 0,
-        total_bytes: 0,
-        last_progress_time: std::time::Instant::now(),
+        progress: None,
     };
 
     let dirs = state.config.backup_dirs.clone();
@@ -365,6 +307,13 @@ pub fn run(config: Config, secrets: Secrets) {
         info!("Scanning {}", &dir);
         backup_folder(Path::new(dir), &mut state).unwrap();
     }
+
+    state.progress = Some({
+        let mut p = ProgressBar::new(state.transfer_bytes);
+        p.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        p.set_units(pbr::Units::Bytes);
+        p
+    });
 
     let mut entries: Vec<DirEnt> = Vec::new();
     state.scan = false;
