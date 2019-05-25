@@ -2,7 +2,7 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
-use rusqlite::{params, Connection, NO_PARAMS};
+use rusqlite::{params, Connection, Statement, NO_PARAMS};
 use shared::{Config, Secrets};
 use std::fs;
 use std::io::Read;
@@ -12,23 +12,23 @@ use std::time::SystemTime;
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
-struct State {
+struct State<'a> {
     secrets: Secrets,
     config: Config,
-    conn: Connection,
     client: reqwest::Client,
     scan: bool,
     transfer_bytes: u64,
     progress: Option<ProgressBar<std::io::Stdout>>,
     last_delete: i64,
+    has_remote_stmt: Statement<'a>,
+    update_remote_stmt: Statement<'a>,
+    get_chunks_stmt: Statement<'a>,
+    update_chunks_stmt: Statement<'a>,
 }
 
 fn has_chunk(chunk: &str, state: &mut State) -> bool {
-    let mut stmt = state
-        .conn
-        .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
-        .unwrap();
-    let cnt: i64 = stmt
+    let cnt: i64 = state
+        .has_remote_stmt
         .query(params![chunk, state.last_delete])
         .unwrap()
         .next()
@@ -90,11 +90,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> String {
         }
     }
 
-    let mut stmt = state
-        .conn
-        .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")
-        .unwrap();
-    stmt.query(params![hash]).unwrap();
+    state.update_remote_stmt.execute(params![hash]).unwrap();
 
     if let Some(p) = &mut state.progress {
         p.add(content.len() as u64);
@@ -115,31 +111,25 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     // Check if we have allready checked the file once
     if !state.config.recheck {
         let chunks: Option<String> = {
-            let mut stmt = state
-                .conn
-                .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
-                .unwrap();
-            let mut rows = stmt
+            let mut rows = state
+                .get_chunks_stmt
                 .query(params![path.to_str().unwrap(), size as i64, mtime as i64])
                 .unwrap();
-
-            if let Some(row) = rows.next().unwrap() {
-                Some(row.get(0).expect("chunks should not be null"))
-            } else {
-                None
+            match rows.next().unwrap() {
+                Some(row) => row.get(0).unwrap(),
+                None => None,
             }
         };
-
-        if let Some(s) = chunks {
+        if let Some(chunks) = chunks {
             let mut good = true;
-            for chunk in s.split(',') {
+            for chunk in chunks.split(',') {
                 if !has_chunk(chunk, state) {
                     good = false;
                     break;
                 }
             }
             if good {
-                return Some(s);
+                return Some(chunks);
             }
         }
     }
@@ -193,14 +183,16 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Option<
     //TODO check if the mtime has changed while we where pushing
 
     state
-        .conn
-        .execute(
-            "REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)",
-            params![&path.to_str().unwrap(), size as i64, mtime as i64, &chunks],
-        )
+        .update_chunks_stmt
+        .execute(params![
+            &path.to_str().unwrap(),
+            size as i64,
+            mtime as i64,
+            &chunks
+        ])
         .expect("insert failed");
 
-    return None;
+    return Some(chunks);
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -326,7 +318,6 @@ pub fn run(config: Config, secrets: Secrets) {
 
         conn.execute(
             "create table if not exists files (
-                id integer primary key,
                 path text not null unique,
                 size integer not null,
                 mtime integer not null,
@@ -346,15 +337,34 @@ pub fn run(config: Config, secrets: Secrets) {
         .expect("Unable to create cache table");
     }
 
+    let has_remote_stmt = conn
+        .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")
+        .unwrap();
+
+    let update_remote_stmt = conn
+        .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")
+        .unwrap();
+
+    let get_chunks_stmt = conn
+        .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")
+        .unwrap();
+
+    let update_chunks_stmt = conn
+        .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")
+        .unwrap();
+
     let mut state = State {
-        secrets: secrets,
-        config: config,
-        conn: conn,
+        secrets,
+        config,
         client: reqwest::Client::new(),
         scan: true,
         transfer_bytes: 0,
         progress: None,
         last_delete: 0,
+        has_remote_stmt,
+        update_remote_stmt,
+        get_chunks_stmt,
+        update_chunks_stmt,
     };
 
     {
