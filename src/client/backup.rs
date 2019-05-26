@@ -95,7 +95,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
 fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<String, Error> {
     let path_str = path.to_str().ok_or(Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
-        p.message(path_str);
+        p.message(&format!("{} ", path_str));
     }
 
     // IF the file is empty we just do nothing
@@ -178,11 +178,12 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirEnt {
     name: String,
-    type_: String,
+    type_: &'static str,
     content: String,
+    size: u64,
 }
 
-fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<String, Error> {
+fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64), Error> {
     entries.sort();
     let mut ans = "".to_string();
     for ent in entries {
@@ -190,13 +191,15 @@ fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<String, Erro
             ans.push('\0');
             ans.push('\0');
         }
-        ans.push_str(&ent.name);
-        ans.push('\0');
-        ans.push_str(&ent.type_);
-        ans.push('\0');
-        ans.push_str(&ent.content);
+        ans.push_str(&format!(
+            "{}\0{}\0{}\0{}",
+            ent.name, ent.type_, ent.size, ent.content
+        ));
     }
-    return push_chunk(ans.as_bytes(), state);
+    return Ok((
+        push_chunk(ans.as_bytes(), state)?,
+        ans.as_bytes().len() as u64,
+    ));
 }
 
 fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
@@ -210,7 +213,7 @@ fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
     return ans as u64;
 }
 
-fn backup_folder(dir: &Path, state: &mut State) -> Result<String, Error> {
+fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> {
     let raw_entries = fs::read_dir(dir)?;
     let mut entries: Vec<DirEnt> = Vec::new();
     for entry in raw_entries {
@@ -224,14 +227,16 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<String, Error> {
         if filename.contains("\0") || filename.contains("\x01") {
             return Err(Error::BadPath(path.to_path_buf()));
         }
-
-        if md.is_dir() {
+        let ft = md.file_type();
+        if ft.is_dir() {
+            let (content, size) = backup_folder(&path, state)?;
             entries.push(DirEnt {
                 name: filename.to_string(),
-                type_: "dir".to_string(),
-                content: backup_folder(&path, state)?,
+                type_: "dir",
+                content,
+                size,
             });
-        } else if md.is_file() {
+        } else if ft.is_file() {
             let mtime = md
                 .modified()?
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -239,16 +244,27 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<String, Error> {
                 .as_secs();
             entries.push(DirEnt {
                 name: filename.to_string(),
-                type_: "file".to_string(),
+                type_: "file",
                 content: backup_file(&path, md.len(), mtime, state)?,
+                size: md.len(),
             });
-        } else {
-
+        } else if ft.is_symlink() {
+            let link = fs::read_link(&path)?;
+            entries.push(DirEnt {
+                name: filename.to_string(),
+                type_: "link",
+                content: link
+                    .to_str()
+                    .ok_or_else(|| Error::BadPath(link.to_path_buf()))?
+                    .to_string(),
+                size: 0,
+            });
         }
     }
     if state.scan {
-        state.transfer_bytes += bytes_ents(entries);
-        return Ok("00000000000000000000000000000000".to_string());
+        let size = bytes_ents(entries);
+        state.transfer_bytes += size;
+        return Ok(("00000000000000000000000000000000".to_string(), size));
     } else {
         return push_ents(entries, state);
     }
@@ -330,15 +346,17 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     state.scan = false;
     for dir in dirs.iter() {
         info!("Backing up {}", &dir);
+        let (content, size) = backup_folder(Path::new(dir), &mut state)?;
         entries.push(DirEnt {
             name: dir.to_string(),
-            type_: "dir".to_string(),
-            content: backup_folder(Path::new(dir), &mut state)?,
+            type_: "dir",
+            content,
+            size,
         });
     }
 
     info!("Storing root");
-    let root = push_ents(entries, &mut state)?;
+    let (root, _) = push_ents(entries, &mut state)?;
 
     let url = format!(
         "{}/roots/{}/{}",

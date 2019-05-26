@@ -88,6 +88,8 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
+    let mut bytes: u64 = 0;
+
     for row in res.text().expect("utf-8").split("\0\0") {
         if row.is_empty() {
             continue;
@@ -159,15 +161,17 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 if let Err(e) = (|| -> Result<(), Error> {
                     let mut ans = row.split('\0');
                     let name = ans.next().ok_or(Error::Msg("Missing name"))?;
-                    let typ = ans.next().ok_or(Error::Msg("Missing type"))?;
+                    let type_ = ans.next().ok_or(Error::Msg("Missing type"))?;
+                    let size: u64 = ans.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                     let reference = ans.next().ok_or(Error::Msg("Missing reference"))?;
                     let path = format!("{}/{}", &path, &name);
-                    match typ {
+                    match type_ {
                         "dir" => dir_stack.push((path, reference.to_string())),
                         "file" => {
                             for (idx, hash) in reference.split(",").enumerate() {
                                 files.entry(hash.to_string()).or_insert((idx, path.clone()));
                             }
+                            bytes += size;
                         }
                         "link" => (),
                         _ => return Err(Error::Msg("Unknown type")),
@@ -189,19 +193,24 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
     match mode {
         Mode::Validate { full } => {
             if true || full {
-                let mut pb = ProgressBar::new(files.len() as u64);
+                let mut pb = ProgressBar::new(bytes);
+                pb.set_units(pbr::Units::Bytes);
                 pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
                 let mut bad_files: usize = 0;
                 for (hash, (idx, path)) in files.iter() {
-                    pb.message(&format!("{}:{}", path, idx));
+                    pb.message(&format!("{}:{} ", path, idx));
                     if hash == "empty" {
                         continue;
                     }
-                    if let Err(e) = get_chunk(&mut client, &config, &secrets, &hash) {
-                        bad_files += 1;
-                        error!("Bad file chunk {} at path {}:{} : {:?}", hash, path, idx, e);
+                    match get_chunk(&mut client, &config, &secrets, &hash) {
+                        Err(e) => {
+                            bad_files += 1;
+                            error!("Bad file chunk {} at path {}:{} : {:?}", hash, path, idx, e);
+                        }
+                        Ok(v) => {
+                            pb.add(v.len() as u64);
+                        }
                     }
-                    pb.inc();
                 }
                 error!("{} of {} file chunks are bad", bad_files, files.len());
             }
