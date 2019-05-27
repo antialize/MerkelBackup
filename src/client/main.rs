@@ -14,7 +14,8 @@ use crypto::digest::Digest;
 mod backup;
 mod shared;
 mod visit;
-use shared::{Config, Error, Secrets};
+use chrono::NaiveDateTime;
+use shared::{check_response, Config, Error, Secrets};
 
 #[macro_use]
 extern crate log;
@@ -116,7 +117,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         )
         .subcommand(
             SubCommand::with_name("backup")
-                .about("perform a backp")
+                .about("perform a backup")
                 .arg(
                     Arg::with_name("recheck")
                         .long("recheck")
@@ -161,6 +162,14 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                 .about("Validate all backed up content"),
         )
         .subcommand(
+            SubCommand::with_name("roots").about("list roots").arg(
+                Arg::with_name("hostname")
+                    .long("hostname")
+                    .takes_value(true)
+                    .help("Hostname to restore from"),
+            ),
+        )
+        .subcommand(
             SubCommand::with_name("restore")
                 .about("restore backup files")
                 .arg(
@@ -171,15 +180,11 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                 )
                 .arg(
                     Arg::with_name("pattern")
-                        .index(2)
+                        .long("pattern")
+                        .short("p")
                         .required(true)
+                        .default_value("/")
                         .help("pattern of files to restore"),
-                )
-                .arg(
-                    Arg::with_name("hostname")
-                        .long("hostname")
-                        .takes_value(true)
-                        .help("Hostname to restore from"),
                 )
                 .arg(
                     Arg::with_name("dest")
@@ -238,39 +243,76 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         return Err(Error::Msg("No servers pecified"));
     }
 
-    match matches.subcommand_name() {
-        Some("backup") => {
-            if matches.is_present("recheck") {
-                config.recheck = true;
-            }
-
-            if let Some(v) = matches.value_of("cache_db") {
-                config.cache_db = v.to_string();
-            }
-            if config.cache_db.is_empty() {
-                return Err(Error::Msg("No cache_db specified"));
-            }
-
-            if let Some(v) = matches.value_of("hostname") {
-                config.hostname = v.to_string();
-            }
-            if config.hostname.is_empty() {
-                return Err(Error::Msg("No host name specified"));
-            }
-
-            if let Some(v) = matches.values_of("dir") {
-                config.backup_dirs = v.map(|v| v.to_string()).collect();
-            }
-            if config.backup_dirs.is_empty() {
-                return Err(Error::Msg("No backup dirs specified"));
-            }
+    if let Some(m) = matches.subcommand_matches("backup") {
+        if m.is_present("recheck") {
+            config.recheck = true;
         }
-        Some("validate") => (),
-        Some("prune") => (),
-        _ => return Err(Error::Msg("No sub command specified")),
+
+        if let Some(v) = m.value_of("cache_db") {
+            config.cache_db = v.to_string();
+        }
+        if config.cache_db.is_empty() {
+            return Err(Error::Msg("No cache_db specified"));
+        }
+
+        if let Some(v) = m.value_of("hostname") {
+            config.hostname = v.to_string();
+        }
+        if config.hostname.is_empty() {
+            return Err(Error::Msg("No host name specified"));
+        }
+
+        if let Some(v) = m.values_of("dir") {
+            config.backup_dirs = v.map(|v| v.to_string()).collect();
+        }
+        if config.backup_dirs.is_empty() {
+            return Err(Error::Msg("No backup dirs specified"));
+        }
+    } else if let Some(m) = matches.subcommand_matches("validate") {
+    } else if let Some(m) = matches.subcommand_matches("prune") {
+    } else if let Some(m) = matches.subcommand_matches("roots") {
+    } else if let Some(m) = matches.subcommand_matches("restore") {
+
+    } else {
+        return Err(Error::Msg("No sub command specified"));
     }
 
     return Ok((config, matches));
+}
+
+fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
+    let mut res = check_response(
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()?,
+    )?;
+    println!("{:5} {:12} {}", "ID", "HOST", "TIME");
+
+    for row in res.text().expect("utf-8").split("\0\0") {
+        if row.is_empty() {
+            continue;
+        }
+        let ans: Vec<&str> = row.split('\0').collect();
+        let id: u64 = ans.get(0).ok_or(Error::MissingRow())?.parse()?;
+        let host: &str = ans.get(1).ok_or(Error::MissingRow())?;
+        let time: i64 = ans.get(2).ok_or(Error::MissingRow())?.parse()?;
+        if let Some(name) = host_name {
+            if name != host {
+                continue;
+            }
+        }
+        println!(
+            "{:<5} {:12} {}",
+            id,
+            host,
+            NaiveDateTime::from_timestamp(time, 0)
+        );
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -283,25 +325,49 @@ fn main() -> Result<(), Error> {
 
     info!("Derive secret!!\n");
     let secrets = derive_secrets(&config.encryption_key);
-    info!("Derive secret!!\n");
-
-    match matches.subcommand_name() {
-        Some("backup") => backup::run(config, secrets),
-        Some("validate") => visit::run(
+    if let Some(_) = matches.subcommand_matches("backup") {
+        backup::run(config, secrets)?;
+    } else if let Some(m) = matches.subcommand_matches("validate") {
+        visit::run(
             config,
             secrets,
             visit::Mode::Validate {
-                full: matches.is_present("full"),
+                full: m.is_present("full"),
             },
-        ),
-        Some("prune") => visit::run(
+        )?;
+    } else if let Some(m) = matches.subcommand_matches("prune") {
+        visit::run(
             config,
             secrets,
             visit::Mode::Prune {
-                dry: matches.is_present("dry"),
+                dry: m.is_present("dry"),
             },
-        ),
-        Some(n) => panic!("unknown subcommand {}", n),
-        None => panic!("No sub command",),
+        )?;
+    } else if let Some(m) = matches.subcommand_matches("restore") {
+        visit::run(
+            config,
+            secrets,
+            visit::Mode::Restore {
+                root: m
+                    .value_of("root")
+                    .ok_or(Error::Msg("Missing root"))?
+                    .to_string(),
+                pattern: m
+                    .value_of("pattern")
+                    .ok_or(Error::Msg("Missing pattern"))?
+                    .to_string(),
+                dest: m
+                    .value_of("dest")
+                    .ok_or(Error::Msg("Missing dest"))?
+                    .to_string(),
+                dry: m.is_present("dry"),
+            },
+        )?;
+    } else if let Some(m) = matches.subcommand_matches("roots") {
+        list_roots(m.value_of("hostname"), config, secrets)?;
+    } else {
+        panic!("unknown subcommand");
     }
+
+    return Ok(());
 }

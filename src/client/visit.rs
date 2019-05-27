@@ -62,9 +62,18 @@ fn get_chunk_utf8(
 }
 
 pub enum Mode {
-    Validate { full: bool },
-    Prune { dry: bool },
-    Recover { path: String, dry: bool },
+    Validate {
+        full: bool,
+    },
+    Prune {
+        dry: bool,
+    },
+    Restore {
+        root: String,
+        pattern: String,
+        dest: String,
+        dry: bool,
+    },
 }
 
 pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
@@ -90,8 +99,10 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
 
     let mut bytes: u64 = 0;
 
+    let mut root_found = false;
+
     for row in res.text().expect("utf-8").split("\0\0") {
-        if row.is_empty() {
+        if row.is_empty() || root_found {
             continue;
         }
         let ans: Vec<&str> = row.split('\0').collect();
@@ -99,14 +110,25 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
         let host = ans.get(1).expect("Missing host");
         let time = ans.get(2).ok_or(Error::MissingRow())?.parse::<i64>()?;
         let hash = ans.get(3).ok_or(Error::MissingRow())?;
-        dir_stack.push((
-            format!("{}_{}", host, NaiveDateTime::from_timestamp(time, 0)),
-            hash.to_string(),
-        ));
+        let root = format!("{}_{}", host, NaiveDateTime::from_timestamp(time, 0));
+        dir_stack.push(("".to_string(), hash.to_string()));
 
         match &mode {
-            Mode::Validate { full } => (),
-            Mode::Recover { dry, path } => (), //TODO checkhost
+            Mode::Validate { full: _ } => (),
+            Mode::Restore {
+                dry: _,
+                dest: _,
+                pattern: p,
+                root,
+            } => {
+                if *root != format!("{}", id)
+                    && *root != format!("{} {}", host, NaiveDateTime::from_timestamp(time, 0))
+                    && root != hash
+                {
+                    continue;
+                }
+                root_found = true;
+            }
             Mode::Prune { dry } => {
                 if time + 60*60/*60*60*24*90*/ < now {
                     info!(
@@ -132,7 +154,6 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 }
             }
         };
-
         info!(
             "Visiting root {} {}",
             host,
@@ -143,6 +164,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 Entry::Occupied(_) => continue,
                 Entry::Vacant(e) => e.insert(path.clone()),
             };
+
             debug!("  Dir {}", path);
 
             let v = match get_chunk_utf8(&mut client, &config, &secrets, &hash) {
@@ -165,6 +187,33 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                     let size: u64 = ans.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                     let reference = ans.next().ok_or(Error::Msg("Missing reference"))?;
                     let path = format!("{}/{}", &path, &name);
+
+                    if let Mode::Restore {
+                        dry,
+                        dest,
+                        pattern,
+                        root: _,
+                    } = &mode
+                    {
+                        if !(path.starts_with(pattern)
+                            || (pattern.starts_with(&path) && type_ != "dir"))
+                        {
+                            return Ok(());
+                        }
+                        let dpath = format!("{}/{}", dest, path);
+                        match type_ {
+                            "dir" => {
+                                debug!("mkdir {}", dpath);
+                                if !dry {
+                                    std::fs::create_dir_all(dpath)?;
+                                }
+                            }
+                            "file" => (),
+                            "link" => (), //TODO create symlink
+                            _ => return Err(Error::Msg("Unknown type")),
+                        }
+                    }
+
                     match type_ {
                         "dir" => dir_stack.push((path, reference.to_string())),
                         "file" => {
@@ -192,7 +241,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
 
     match mode {
         Mode::Validate { full } => {
-            if true || full {
+            if full {
                 let mut pb = ProgressBar::new(bytes);
                 pb.set_units(pbr::Units::Bytes);
                 pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
@@ -276,7 +325,12 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             }
             pb.finish();
         }
-        Mode::Recover { dry, path } => {}
+        Mode::Restore {
+            dry,
+            dest,
+            pattern,
+            root,
+        } => {}
     }
     Ok(())
 }
