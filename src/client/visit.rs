@@ -3,11 +3,13 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
-use shared::{check_response, Config, Error, Secrets};
+use shared::{check_response, Config, EType, Error, Secrets};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -71,9 +73,10 @@ pub enum Mode {
     },
     Restore {
         root: String,
-        pattern: String,
-        dest: String,
+        pattern: PathBuf,
+        dest: PathBuf,
         dry: bool,
+        preserve_owner: bool,
     },
 }
 
@@ -89,16 +92,27 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             .send()?,
     )?;
 
-    let mut files: HashMap<String, (usize, String)> = HashMap::new();
-    let mut dirs: HashMap<String, String> = HashMap::new();
-    let mut dir_stack: Vec<(String, String)> = Vec::new();
+    struct Ent {
+        etype: EType,
+        path: std::path::PathBuf,
+        size: u64,
+        st_mode: u32,
+        uid: u32,
+        gid: u32,
+        atime: i64,
+        mtime: i64,
+        chunks: Vec<String>,
+    }
+
+    let mut entries: Vec<Ent> = Vec::new();
+
+    let mut dirs: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let mut dir_stack: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut bad_dirs: usize = 0;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
-
-    let mut bytes: u64 = 0;
 
     let mut root_found = false;
 
@@ -111,16 +125,16 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
         let host = ans.get(1).expect("Missing host");
         let time = ans.get(2).ok_or(Error::MissingRow())?.parse::<i64>()?;
         let hash = ans.get(3).ok_or(Error::MissingRow())?;
-        let root = format!("{}_{}", host, NaiveDateTime::from_timestamp(time, 0));
-        dir_stack.push(("".to_string(), hash.to_string()));
+        dir_stack.push((std::path::PathBuf::new(), hash.to_string()));
 
         match &mode {
             Mode::Validate { full: _ } => (),
             Mode::Restore {
                 dry: _,
                 dest: _,
-                pattern: p,
+                pattern: _,
                 root,
+                preserve_owner: _,
             } => {
                 if *root != format!("{}", id)
                     && *root != format!("{} {}", host, NaiveDateTime::from_timestamp(time, 0))
@@ -131,7 +145,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 root_found = true;
             }
             Mode::Prune { dry } => {
-                if time + 60*60/*60*60*24*90*/ < now {
+                if time + 60 * 60 * 60 * 60 * 24 * 90 < now {
                     info!(
                         "Removing root {} {}",
                         host,
@@ -166,12 +180,12 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 Entry::Vacant(e) => e.insert(path.clone()),
             };
 
-            debug!("  Dir {}", path);
+            debug!("  Dir {:?}", path);
 
             let v = match get_chunk_utf8(&mut client, &config, &secrets, &hash) {
                 Err(e) => {
                     bad_dirs += 1;
-                    error!("Bad dir {} at path {}: {:?}", hash, path, e);
+                    error!("Bad dir {} at path {:?}: {:?}", hash, path, e);
                     continue;
                 }
                 Ok(v) => v,
@@ -184,7 +198,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 if let Err(e) = (|| -> Result<(), Error> {
                     let mut ans = row.split('\0');
                     let name = ans.next().ok_or(Error::Msg("Missing name"))?;
-                    let type_ = ans.next().ok_or(Error::Msg("Missing type"))?;
+                    let etype: EType = ans.next().ok_or(Error::Msg("Missing type"))?.parse()?;
                     let size: u64 = ans.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                     let reference = ans.next().ok_or(Error::Msg("Missing reference"))?;
                     let st_mode: u32 = ans.next().ok_or(Error::Msg("Missing mode"))?.parse()?;
@@ -192,83 +206,45 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                     let gid: u32 = ans.next().ok_or(Error::Msg("Missing gid"))?.parse()?;
                     let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
                     let atime: i64 = ans.next().ok_or(Error::Msg("Missing atime"))?.parse()?;
-                    let ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
+                    let _ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
 
-                    let path = format!("{}/{}", &path, &name);
-
+                    let path = path.join(name);
                     if let Mode::Restore {
-                        dry,
-                        dest,
+                        dry: _,
+                        dest: _,
                         pattern,
                         root: _,
+                        preserve_owner: _,
                     } = &mode
                     {
                         if !(path.starts_with(pattern)
-                            || (pattern.starts_with(&path) && type_ != "dir"))
+                            || (pattern.starts_with(&path) && etype != EType::Dir))
                         {
                             return Ok(());
                         }
+                    };
 
-                        let dpath = std::path::PathBuf::from(format!("{}/{}", dest, path));
-                        match type_ {
-                            "dir" => {
-                                debug!("mkdir {:?}", dpath);
-                                if !dry {
-                                    std::fs::create_dir_all(&dpath)?;
-                                    std::fs::set_permissions(
-                                        &dpath,
-                                        std::fs::Permissions::from_mode(st_mode),
-                                    )?;
-                                    nix::unistd::chown(
-                                        &dpath,
-                                        Some(nix::unistd::Uid::from_raw(uid)),
-                                        Some(nix::unistd::Gid::from_raw(gid)),
-                                    )?;
-                                    filetime::set_file_times(
-                                        &dpath,
-                                        filetime::FileTime::from_unix_time(atime, 0),
-                                        filetime::FileTime::from_unix_time(mtime, 0),
-                                    )?;
-                                }
-                            }
-                            "file" => (),
-                            "link" => {
-                                std::os::unix::fs::symlink(&dpath, reference)?;
-                                std::fs::set_permissions(
-                                    &dpath,
-                                    std::fs::Permissions::from_mode(st_mode),
-                                )?;
-                                nix::unistd::chown(
-                                    &dpath,
-                                    Some(nix::unistd::Uid::from_raw(uid)),
-                                    Some(nix::unistd::Gid::from_raw(gid)),
-                                )?;
-                                filetime::set_file_times(
-                                    &dpath,
-                                    filetime::FileTime::from_unix_time(atime, 0),
-                                    filetime::FileTime::from_unix_time(mtime, 0),
-                                )?;
-                            } //TODO create symlink
-                            _ => return Err(Error::Msg("Unknown type")),
-                        }
+                    if etype == EType::Dir {
+                        dir_stack.push((path.clone(), reference.to_string()));
                     }
 
-                    match type_ {
-                        "dir" => dir_stack.push((path, reference.to_string())),
-                        "file" => {
-                            for (idx, hash) in reference.split(",").enumerate() {
-                                files.entry(hash.to_string()).or_insert((idx, path.clone()));
-                            }
-                            bytes += size;
-                        }
-                        "link" => (),
-                        _ => return Err(Error::Msg("Unknown type")),
-                    }
+                    entries.push(Ent {
+                        path,
+                        etype,
+                        size,
+                        st_mode,
+                        uid,
+                        gid,
+                        mtime,
+                        atime,
+                        chunks: reference.split(",").map(|s| s.to_string()).collect(),
+                    });
+
                     return Ok(());
                 })() {
                     bad_dirs += 1;
                     error!(
-                        "Bad row '{}` in dir {} at path {}: {:?}",
+                        "Bad row '{}` in dir {} at path {:?}: {:?}",
                         row, hash, path, e
                     );
                 }
@@ -281,19 +257,33 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
     match mode {
         Mode::Validate { full } => {
             if full {
+                let mut files: HashMap<&str, (usize, &PathBuf)> = HashMap::new();
+                let mut bytes: u64 = 0;
+                for ent in entries.iter() {
+                    if ent.etype != EType::File {
+                        continue;
+                    }
+                    for (idx, chunk) in ent.chunks.iter().enumerate() {
+                        files.entry(&chunk).or_insert((idx, &ent.path));
+                    }
+                    bytes += ent.size;
+                }
                 let mut pb = ProgressBar::new(bytes);
                 pb.set_units(pbr::Units::Bytes);
                 pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
                 let mut bad_files: usize = 0;
                 for (hash, (idx, path)) in files.iter() {
-                    pb.message(&format!("{}:{} ", path, idx));
-                    if hash == "empty" {
+                    pb.message(&format!("{:?}:{} ", path, idx));
+                    if hash == &"empty" {
                         continue;
                     }
                     match get_chunk(&mut client, &config, &secrets, &hash) {
                         Err(e) => {
                             bad_files += 1;
-                            error!("Bad file chunk {} at path {}:{} : {:?}", hash, path, idx, e);
+                            error!(
+                                "Bad file chunk {} at path {:?}:{} : {:?}",
+                                hash, path, idx, e
+                            );
                         }
                         Ok(v) => {
                             pb.add(v.len() as u64);
@@ -314,6 +304,19 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             )?
             .text()?;
 
+            let mut used: HashSet<&str> = HashSet::new();
+            for dir in dirs.keys() {
+                used.insert(dir);
+            }
+            for ent in entries.iter() {
+                if ent.etype == EType::Link {
+                    continue;
+                }
+                for chunk in ent.chunks.iter() {
+                    used.insert(chunk);
+                }
+            }
+
             let mut total = 0;
             let mut removed_size = 0;
             let mut remove = Vec::new();
@@ -325,10 +328,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
                 let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                 total += 1;
-                if files.contains_key(chunk) {
-                    continue;
-                }
-                if dirs.contains_key(chunk) {
+                if used.contains(chunk) {
                     continue;
                 }
                 removed_size += size;
@@ -367,9 +367,72 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
         Mode::Restore {
             dry,
             dest,
-            pattern,
-            root,
-        } => {}
+            pattern: _,
+            root: _,
+            preserve_owner,
+        } => {
+            if !root_found {
+                return Err(Error::Msg("Root not found"));
+            }
+            let bytes = entries.iter().map(|e| e.size).sum();
+            let mut pb = ProgressBar::new(bytes);
+            pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+            pb.set_units(pbr::Units::Bytes);
+            for ent in entries {
+                pb.message(&format!("{:?}: ", &ent.path));
+                let dpath = dest.join(
+                    ent.path
+                        .strip_prefix("/")
+                        .map_err(|_| Error::Msg("Path not absolute"))?,
+                );
+                match ent.etype {
+                    EType::Dir => {
+                        info!("DIR {:?}", dpath);
+                        if !dry {
+                            std::fs::create_dir_all(&dpath)?;
+                        }
+                        pb.add(ent.size);
+                    }
+                    EType::Link => {
+                        info!("LINK {:?}", dpath);
+                        if !dry {
+                            std::os::unix::fs::symlink(&dpath, ent.chunks.first().unwrap())?;
+                        }
+                        pb.add(ent.size);
+                    }
+                    EType::File => {
+                        info!("FILE {:?}", dpath);
+                        if !dry {
+                            let mut file = std::fs::File::create(&dpath)?;
+                            for chunk in ent.chunks {
+                                let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
+                                file.write(&res)?;
+                                pb.add(res.len() as u64);
+                            }
+                        } else {
+                            pb.add(ent.size);
+                        }
+                    }
+                }
+                if !dry {
+                    std::fs::set_permissions(&dpath, std::fs::Permissions::from_mode(ent.st_mode))?;
+                    if preserve_owner {
+                        nix::unistd::fchownat(
+                            None,
+                            &dpath,
+                            Some(nix::unistd::Uid::from_raw(ent.uid)),
+                            Some(nix::unistd::Gid::from_raw(ent.gid)),
+                            nix::unistd::FchownatFlags::NoFollowSymlink,
+                        )?;
+                    }
+                    filetime::set_file_times(
+                        &dpath,
+                        filetime::FileTime::from_unix_time(ent.atime, 0),
+                        filetime::FileTime::from_unix_time(ent.mtime, 0),
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }

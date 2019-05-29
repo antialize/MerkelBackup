@@ -2,6 +2,35 @@ extern crate serde;
 use serde::Deserialize;
 extern crate crypto;
 
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EType {
+    File,
+    Dir,
+    Link,
+}
+
+impl std::str::FromStr for EType {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<EType, Error> {
+        match s {
+            "file" => Ok(EType::File),
+            "dir" => Ok(EType::Dir),
+            "link" => Ok(EType::Link),
+            _ => Err(Error::Msg("Bad type")),
+        }
+    }
+}
+impl std::fmt::Display for EType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            EType::File => write!(f, "file"),
+            EType::Dir => write!(f, "dir"),
+            EType::Link => write!(f, "link"),
+        }
+    }
+}
+
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(remote = "log::LevelFilter")]
 pub enum LevelFilterDef {

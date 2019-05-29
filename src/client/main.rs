@@ -185,7 +185,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                         .long("pattern")
                         .short("p")
                         .required(true)
-                        .default_value("/")
+                        .default_value("")
                         .help("pattern of files to restore"),
                 )
                 .arg(
@@ -195,6 +195,16 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                         .takes_value(true)
                         .default_value("/")
                         .help("Where to store the restored files"),
+                )
+                .arg(
+                    Arg::with_name("preserve_owner")
+                        .long("preserve_owner")
+                        .help("Chown restored objects"),
+                )
+                .arg(
+                    Arg::with_name("dry")
+                        .long("dry")
+                        .help("Don't actually restore anything"),
                 ),
         )
         .get_matches();
@@ -270,10 +280,10 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         if config.backup_dirs.is_empty() {
             return Err(Error::Msg("No backup dirs specified"));
         }
-    } else if let Some(m) = matches.subcommand_matches("validate") {
-    } else if let Some(m) = matches.subcommand_matches("prune") {
-    } else if let Some(m) = matches.subcommand_matches("roots") {
-    } else if let Some(m) = matches.subcommand_matches("restore") {
+    } else if let Some(_) = matches.subcommand_matches("validate") {
+    } else if let Some(_) = matches.subcommand_matches("prune") {
+    } else if let Some(_) = matches.subcommand_matches("roots") {
+    } else if let Some(_) = matches.subcommand_matches("restore") {
 
     } else {
         return Err(Error::Msg("No sub command specified"));
@@ -354,15 +364,14 @@ fn main() -> Result<(), Error> {
                     .value_of("root")
                     .ok_or(Error::Msg("Missing root"))?
                     .to_string(),
-                pattern: m
-                    .value_of("pattern")
-                    .ok_or(Error::Msg("Missing pattern"))?
-                    .to_string(),
-                dest: m
-                    .value_of("dest")
-                    .ok_or(Error::Msg("Missing dest"))?
-                    .to_string(),
+                pattern: std::path::PathBuf::from(
+                    m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
+                ),
+                dest: std::path::PathBuf::from(
+                    m.value_of("dest").ok_or(Error::Msg("Missing dest"))?,
+                ),
                 dry: m.is_present("dry"),
+                preserve_owner: m.is_present("preserve_owner"),
             },
         )?;
     } else if let Some(m) = matches.subcommand_matches("roots") {
