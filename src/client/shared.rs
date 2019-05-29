@@ -66,6 +66,7 @@ pub enum Error {
     Time(std::time::SystemTimeError),
     Msg(&'static str),
     Toml(toml::de::Error),
+    Nix(nix::Error),
 }
 
 impl From<rusqlite::Error> for Error {
@@ -109,6 +110,13 @@ impl From<toml::de::Error> for Error {
         Error::Toml(error)
     }
 }
+
+impl From<nix::Error> for Error {
+    fn from(error: nix::Error) -> Self {
+        Error::Nix(error)
+    }
+}
+
 pub fn check_response(res: reqwest::Response) -> Result<reqwest::Response, Error> {
     match res.status() {
         reqwest::StatusCode::OK => Ok(res),

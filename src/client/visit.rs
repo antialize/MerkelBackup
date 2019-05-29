@@ -7,6 +7,7 @@ use shared::{check_response, Config, Error, Secrets};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -186,6 +187,13 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                     let type_ = ans.next().ok_or(Error::Msg("Missing type"))?;
                     let size: u64 = ans.next().ok_or(Error::Msg("Missing size"))?.parse()?;
                     let reference = ans.next().ok_or(Error::Msg("Missing reference"))?;
+                    let st_mode: u32 = ans.next().ok_or(Error::Msg("Missing mode"))?.parse()?;
+                    let uid: u32 = ans.next().ok_or(Error::Msg("Missing uid"))?.parse()?;
+                    let gid: u32 = ans.next().ok_or(Error::Msg("Missing gid"))?.parse()?;
+                    let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
+                    let atime: i64 = ans.next().ok_or(Error::Msg("Missing atime"))?.parse()?;
+                    let ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
+
                     let path = format!("{}/{}", &path, &name);
 
                     if let Mode::Restore {
@@ -200,16 +208,47 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                         {
                             return Ok(());
                         }
-                        let dpath = format!("{}/{}", dest, path);
+
+                        let dpath = std::path::PathBuf::from(format!("{}/{}", dest, path));
                         match type_ {
                             "dir" => {
-                                debug!("mkdir {}", dpath);
+                                debug!("mkdir {:?}", dpath);
                                 if !dry {
-                                    std::fs::create_dir_all(dpath)?;
+                                    std::fs::create_dir_all(&dpath)?;
+                                    std::fs::set_permissions(
+                                        &dpath,
+                                        std::fs::Permissions::from_mode(st_mode),
+                                    )?;
+                                    nix::unistd::chown(
+                                        &dpath,
+                                        Some(nix::unistd::Uid::from_raw(uid)),
+                                        Some(nix::unistd::Gid::from_raw(gid)),
+                                    )?;
+                                    filetime::set_file_times(
+                                        &dpath,
+                                        filetime::FileTime::from_unix_time(atime, 0),
+                                        filetime::FileTime::from_unix_time(mtime, 0),
+                                    )?;
                                 }
                             }
                             "file" => (),
-                            "link" => (), //TODO create symlink
+                            "link" => {
+                                std::os::unix::fs::symlink(&dpath, reference)?;
+                                std::fs::set_permissions(
+                                    &dpath,
+                                    std::fs::Permissions::from_mode(st_mode),
+                                )?;
+                                nix::unistd::chown(
+                                    &dpath,
+                                    Some(nix::unistd::Uid::from_raw(uid)),
+                                    Some(nix::unistd::Gid::from_raw(gid)),
+                                )?;
+                                filetime::set_file_times(
+                                    &dpath,
+                                    filetime::FileTime::from_unix_time(atime, 0),
+                                    filetime::FileTime::from_unix_time(mtime, 0),
+                                )?;
+                            } //TODO create symlink
                             _ => return Err(Error::Msg("Unknown type")),
                         }
                     }

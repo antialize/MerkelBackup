@@ -1,7 +1,9 @@
 extern crate chrono;
 extern crate clap;
 extern crate crypto;
+extern crate filetime;
 extern crate hex;
+extern crate nix;
 extern crate pbr;
 extern crate reqwest;
 extern crate rusqlite;

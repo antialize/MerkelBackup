@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, Statement, NO_PARAMS};
 use shared::{check_response, Config, Error, Secrets};
 use std::fs;
 use std::io::Read;
+use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -181,6 +182,12 @@ struct DirEnt {
     type_: &'static str,
     content: String,
     size: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    mtime: i64,
+    atime: i64,
+    ctime: i64,
 }
 
 fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64), Error> {
@@ -192,8 +199,17 @@ fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64
             ans.push('\0');
         }
         ans.push_str(&format!(
-            "{}\0{}\0{}\0{}",
-            ent.name, ent.type_, ent.size, ent.content
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            ent.name,
+            ent.type_,
+            ent.size,
+            ent.content,
+            ent.mode,
+            ent.uid,
+            ent.gid,
+            ent.mtime,
+            ent.atime,
+            ent.ctime,
         ));
     }
     return Ok((
@@ -224,7 +240,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
             .to_str()
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
-        if filename.contains("\0") || filename.contains("\x01") {
+        if filename.contains("\0") {
             return Err(Error::BadPath(path.to_path_buf()));
         }
         let ft = md.file_type();
@@ -235,6 +251,12 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 type_: "dir",
                 content,
                 size,
+                mode: md.st_mode(),
+                uid: md.st_uid(),
+                gid: md.st_gid(),
+                atime: md.st_atime(),
+                mtime: md.st_mtime(),
+                ctime: md.st_ctime(),
             });
         } else if ft.is_file() {
             let mtime = md
@@ -247,6 +269,12 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 type_: "file",
                 content: backup_file(&path, md.len(), mtime, state)?,
                 size: md.len(),
+                mode: md.st_mode(),
+                uid: md.st_uid(),
+                gid: md.st_gid(),
+                atime: md.st_atime(),
+                mtime: md.st_mtime(),
+                ctime: md.st_ctime(),
             });
         } else if ft.is_symlink() {
             let link = fs::read_link(&path)?;
@@ -258,6 +286,12 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                     .ok_or_else(|| Error::BadPath(link.to_path_buf()))?
                     .to_string(),
                 size: 0,
+                mode: md.st_mode(),
+                uid: md.st_uid(),
+                gid: md.st_gid(),
+                atime: md.st_atime(),
+                mtime: md.st_mtime(),
+                ctime: md.st_ctime(),
             });
         }
     }
@@ -346,12 +380,21 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     state.scan = false;
     for dir in dirs.iter() {
         info!("Backing up {}", &dir);
-        let (content, size) = backup_folder(Path::new(dir), &mut state)?;
+        let path = Path::new(dir);
+        let md = fs::metadata(&path)?;
+
+        let (content, size) = backup_folder(path, &mut state)?;
         entries.push(DirEnt {
             name: dir.to_string(),
             type_: "dir",
             content,
             size,
+            mode: md.st_mode(),
+            uid: md.st_uid(),
+            gid: md.st_gid(),
+            atime: md.st_atime(),
+            mtime: md.st_mtime(),
+            ctime: md.st_ctime(),
         });
     }
 
