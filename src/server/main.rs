@@ -364,6 +364,44 @@ fn handle_delete_chunk(
         return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad chunk", "");
     }
     let conn = state.conn.lock().unwrap();
+
+    let mut stmt = conn
+        .prepare("SELECT content IS NULL FROM chunks WHERE bucket=? AND hash=?")
+        .unwrap();
+
+    let mut rows = stmt.query(params![bucket, chunk]).unwrap();
+    let external: bool = match rows.next().expect("Unable to read db row") {
+        Some(row) => row.get_unwrap(0),
+        None => {
+            return handle_error(
+                file!(),
+                line!(),
+                StatusCode::NOT_FOUND,
+                "Missing churk",
+                chunk,
+            )
+        }
+    };
+
+    if external {
+        let path = format!(
+            "{}/data/{}/{}/{}",
+            state.config.data_dir,
+            &bucket,
+            &chunk[..2],
+            &chunk[2..]
+        );
+        if let Err(e) = std::fs::remove_file(path) {
+            return handle_error(
+                file!(),
+                line!(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Delete failed",
+                e,
+            );
+        }
+    }
+
     match conn.execute(
         "DELETE FROM chunks WHERE bucket=? AND hash=?",
         params![bucket, chunk],
