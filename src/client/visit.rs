@@ -19,6 +19,9 @@ fn get_chunk(
     secrets: &Secrets,
     hash: &str,
 ) -> Result<Vec<u8>, Error> {
+    if hash == "empty" {
+        return Ok(Vec::new());
+    }
     let url = format!(
         "{}/chunks/{}/{}",
         &config.server,
