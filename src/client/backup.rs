@@ -3,7 +3,7 @@ use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
 use rusqlite::{params, Connection, Statement, NO_PARAMS};
-use shared::{check_response, Config, Error, Secrets};
+use shared::{check_response, Config, EType, Error, Secrets};
 use std::fs;
 use std::io::Read;
 use std::os::linux::fs::MetadataExt;
@@ -179,7 +179,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirEnt {
     name: String,
-    type_: &'static str,
+    etype: EType,
     content: String,
     size: u64,
     mode: u32,
@@ -201,7 +201,7 @@ fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64
         ans.push_str(&format!(
             "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             ent.name,
-            ent.type_,
+            ent.etype,
             ent.size,
             ent.content,
             ent.mode,
@@ -224,7 +224,7 @@ fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
         if ans != 0 {
             ans += 1
         }
-        ans += ent.name.len() + 2 + ent.type_.len() + ent.content.len()
+        ans += ent.name.len() + 25 + ent.content.len()
     }
     return ans as u64;
 }
@@ -248,7 +248,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             let (content, size) = backup_folder(&path, state)?;
             entries.push(DirEnt {
                 name: filename.to_string(),
-                type_: "dir",
+                etype: EType::Dir,
                 content,
                 size,
                 mode: md.st_mode(),
@@ -266,7 +266,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 .as_secs();
             entries.push(DirEnt {
                 name: filename.to_string(),
-                type_: "file",
+                etype: EType::File,
                 content: backup_file(&path, md.len(), mtime, state)?,
                 size: md.len(),
                 mode: md.st_mode(),
@@ -280,7 +280,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             let link = fs::read_link(&path)?;
             entries.push(DirEnt {
                 name: filename.to_string(),
-                type_: "link",
+                etype: EType::Link,
                 content: link
                     .to_str()
                     .ok_or_else(|| Error::BadPath(link.to_path_buf()))?
@@ -386,7 +386,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         let (content, size) = backup_folder(path, &mut state)?;
         entries.push(DirEnt {
             name: dir.to_string(),
-            type_: "dir",
+            etype: EType::Dir,
             content,
             size,
             mode: md.st_mode(),
