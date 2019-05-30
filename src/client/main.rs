@@ -152,6 +152,12 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                         .long("dry")
                         .help("Don't actually remove anything"),
                 )
+                .arg(
+                    Arg::with_name("age")
+                        .long("age")
+                        .help("Remove roots more than age dayes old")
+                        .takes_value(true),
+                )
                 .about("Remove old roots, and then perform garbage collection"),
         )
         .subcommand(
@@ -170,6 +176,16 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                     .takes_value(true)
                     .help("Hostname to restore from"),
             ),
+        )
+        .subcommand(
+            SubCommand::with_name("delete-root")
+                .about("delete a root")
+                .arg(
+                    Arg::with_name("root")
+                        .index(1)
+                        .required(true)
+                        .help("the root to restore"),
+                ),
         )
         .subcommand(
             SubCommand::with_name("restore")
@@ -281,7 +297,10 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
             return Err(Error::Msg("No backup dirs specified"));
         }
     } else if let Some(_) = matches.subcommand_matches("validate") {
-    } else if let Some(_) = matches.subcommand_matches("prune") {
+    } else if let Some(m) = matches.subcommand_matches("prune") {
+        if let Some(v) = m.value_of("age") {
+            let _: u32 = v.parse()?;
+        }
     } else if let Some(_) = matches.subcommand_matches("roots") {
     } else if let Some(_) = matches.subcommand_matches("restore") {
 
@@ -353,6 +372,7 @@ fn main() -> Result<(), Error> {
             secrets,
             visit::Mode::Prune {
                 dry: m.is_present("dry"),
+                age: m.value_of("age").map(|f| f.parse().unwrap()),
             },
         )?;
     } else if let Some(m) = matches.subcommand_matches("restore") {

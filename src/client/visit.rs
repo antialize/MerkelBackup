@@ -70,6 +70,7 @@ pub enum Mode {
     },
     Prune {
         dry: bool,
+        age: Option<u32>,
     },
     Restore {
         root: String,
@@ -293,7 +294,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                 error!("{} of {} file chunks are bad", bad_files, files.len());
             }
         }
-        Mode::Prune { dry } => {
+        Mode::Prune { dry, age: _ } => {
             let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
             let mut content = check_response(
@@ -336,7 +337,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             }
 
             info!("Removing {} of {} chunks", remove.len(), total);
-            if dry {
+            if *dry {
                 return Ok(());
             }
 
