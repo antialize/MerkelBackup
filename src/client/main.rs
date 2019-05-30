@@ -303,7 +303,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         }
     } else if let Some(_) = matches.subcommand_matches("roots") {
     } else if let Some(_) = matches.subcommand_matches("restore") {
-
+    } else if let Some(_) = matches.subcommand_matches("delete-root") {
     } else {
         return Err(Error::Msg("No sub command specified"));
     }
@@ -344,6 +344,35 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
     }
 
     Ok(())
+}
+
+fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
+    let client = reqwest::Client::new();
+    match visit::roots(&config, &secrets, &client, Some(root))?
+        .iter()
+        .next()
+    {
+        Some(Err(e)) => error!("Bad root: {:?}", e),
+        Some(Ok(root)) => {
+            let url = format!(
+                "{}/roots/{}/{}",
+                &config.server,
+                hex::encode(&secrets.bucket),
+                root.id
+            );
+            info!("URL {}", url);
+            check_response(
+                client
+                    .delete(&url[..])
+                    .basic_auth(&config.user, Some(&config.password))
+                    .send()?,
+            )?;
+        }
+        None => {
+            error!("Could not find root {}", root);
+        }
+    }
+    return Ok(());
 }
 
 fn main() -> Result<(), Error> {
@@ -394,6 +423,8 @@ fn main() -> Result<(), Error> {
                 preserve_owner: m.is_present("preserve_owner"),
             },
         )?;
+    } else if let Some(m) = matches.subcommand_matches("delete-root") {
+        delete_root(m.value_of("root").unwrap(), config, secrets)?;
     } else if let Some(m) = matches.subcommand_matches("roots") {
         list_roots(m.value_of("hostname"), config, secrets)?;
     } else {
