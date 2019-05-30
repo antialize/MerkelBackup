@@ -420,7 +420,7 @@ fn handle_delete_chunk(
     };
 
     match conn.execute(
-        "REPLACE INTO VALUES (?, strftime('%s', 'now'))",
+        "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
         params![bucket],
     ) {
         Err(e) => {
@@ -567,7 +567,6 @@ fn handle_put_root(
 
 fn handle_delete_root(
     bucket: String,
-    host: String,
     root: String,
     req: Request<Body>,
     state: Arc<State>,
