@@ -38,12 +38,15 @@ fn get_chunk(
 
     let len = res.content_length().unwrap_or(0);
     let mut encrypted = Vec::with_capacity(len as usize);
-    res.read_to_end(&mut encrypted)?;
+    let len = res.read_to_end(&mut encrypted)?;
+    if len < 12 {
+        return Err(Error::Msg("Missing nonce"))
+    }
 
     let mut content = Vec::with_capacity(encrypted.len());
-    content.resize(encrypted.len(), 0);
-    crypto::chacha20::ChaCha20::new(&secrets.key, &secrets.iv[0..12])
-        .process(&encrypted, &mut content);
+    content.resize(encrypted.len() - 12, 0);
+    crypto::chacha20::ChaCha20::new(&secrets.key, &encrypted[..12])
+        .process(&encrypted[12..], &mut content);
 
     let mut hasher = Blake2b::new(256 / 8);
     hasher.input(&secrets.seed);

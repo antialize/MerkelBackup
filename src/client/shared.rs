@@ -78,7 +78,6 @@ pub struct Secrets {
     pub bucket: [u8; 32],
     pub seed: [u8; 32],
     pub key: [u8; 32],
-    pub iv: [u8; 32],
 }
 
 #[derive(Debug)]

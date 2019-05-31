@@ -9,6 +9,7 @@ extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
 extern crate simple_logger;
+extern crate rand;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use crypto::blake2b::Blake2b;
@@ -64,7 +65,6 @@ fn derive_secrets(password: &str) -> Secrets {
     let mut secrets: Secrets = Default::default();
     secrets.bucket.copy_from_slice(&data[0..W]);
     secrets.seed.copy_from_slice(&data[128..128 + W]);
-    secrets.iv.copy_from_slice(&data[1024..1024 + W]);
     secrets.key.copy_from_slice(&data[(ITEMS - 1) * W..]);
     secrets
 }

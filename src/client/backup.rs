@@ -10,6 +10,7 @@ use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
+use rand::Rng;
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -25,6 +26,7 @@ struct State<'a> {
     update_remote_stmt: Statement<'a>,
     get_chunks_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
+    rng: rand::rngs::OsRng,
 }
 
 fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
@@ -71,9 +73,11 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         );
 
         let mut crypted = Vec::new();
-        crypted.resize(content.len(), 0);
-        crypto::chacha20::ChaCha20::new(&state.secrets.key, &state.secrets.iv[0..12])
-            .process(content, &mut crypted);
+        crypted.resize(content.len() + 12, 0);
+        state.rng.fill(&mut crypted[..12]);
+
+        crypto::chacha20::ChaCha20::new(&state.secrets.key, &crypted[..12])
+            .process(content, &mut crypted[12..]);
 
         check_response(
             state
@@ -343,6 +347,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
+        rng: rand::rngs::OsRng::new().map_err(|_| Error::Msg("Unable to open rng"))?,
     };
 
     {
