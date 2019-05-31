@@ -835,6 +835,7 @@ fn main() {
     let srv = TcpListener::bind(&addr).expect("Error binding local port");
 
     info!("Server listening on {}", state.config.bind);
+    info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
 
     let http_proto = Http::new();
     let server = http_proto
