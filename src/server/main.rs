@@ -1,3 +1,6 @@
+//! This is the implementation for the mbackup server.
+//! It presents a REST api served over a hyper https server.
+
 extern crate clap;
 extern crate futures;
 extern crate hyper;
@@ -26,10 +29,15 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
+
+
+/// Chunks smaller that this goes into the sqlite database instead of directly on disk
 const SMALL_SIZE: usize = 1024 * 128;
 
+/// The main result type used throughout
 type ResponseFuture = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 
+/// The access level required, Put is the minimal, Delete is the maximal
 #[derive(Deserialize, PartialEq, Debug)]
 enum AccessType {
     Put,
@@ -37,6 +45,7 @@ enum AccessType {
     Delete,
 }
 
+/// Convert an access lever to a number for comparison
 fn access_level(access_type: &AccessType) -> u8 {
     match access_type {
         AccessType::Put => 0,
@@ -45,6 +54,7 @@ fn access_level(access_type: &AccessType) -> u8 {
     }
 }
 
+/// A user as defined in the config file
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 struct User {
@@ -53,6 +63,9 @@ struct User {
     access_level: AccessType,
 }
 
+/// The log level as defined in the config file
+///
+/// We need this duplication hack so we can get serde to deserialise it
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(remote = "log::LevelFilter")]
 pub enum LevelFilterDef {
@@ -64,6 +77,7 @@ pub enum LevelFilterDef {
     Trace,
 }
 
+/// The main configuration structure
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
@@ -76,6 +90,7 @@ struct Config {
     users: Vec<User>,
 }
 
+/// Provide default values for the configuration
 impl Default for Config {
     fn default() -> Config {
         Config {
@@ -89,12 +104,13 @@ impl Default for Config {
     }
 }
 
+/// The state passed around the variaus methods
 struct State {
     config: Config,
     conn: Mutex<Connection>,
 }
 
-/** Construct a simple http responce */
+/// Print an error to the terminal and return a future describing the error
 fn handle_error_i<E: std::fmt::Debug>(
     file: &str,
     line: u32,
@@ -113,6 +129,7 @@ fn handle_error_i<E: std::fmt::Debug>(
     );
 }
 
+/// Print an error to the terminal and return a boxed future describing the error
 fn handle_error<E: std::fmt::Debug>(
     file: &str,
     line: u32,
@@ -123,6 +140,7 @@ fn handle_error<E: std::fmt::Debug>(
     return Box::new(handle_error_i(file, line, code, message, e));
 }
 
+/// Construct a http ok response
 fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>, hyper::Error> {
     return future::ok(
         Response::builder()
@@ -135,10 +153,12 @@ fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>,
     );
 }
 
+/// Construct a boxed http ok response
 fn ok_message(message: Option<String>) -> ResponseFuture {
     return Box::new(ok_message_i(message));
 }
 
+/// Construct an unauthorize http response
 fn unauthorized_message() -> ResponseFuture {
     return Box::new(future::ok(
         Response::builder()
@@ -152,6 +172,9 @@ fn unauthorized_message() -> ResponseFuture {
     ));
 }
 
+/// Check if the user has an access lever greater than or equal to level
+/// If he does None is returned
+/// Otherwise Some(unauthorized_message()) is returned
 fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Option<ResponseFuture> {
     let auth = match req.headers().get("Authorization") {
         Some(data) => data,
@@ -179,7 +202,7 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
     Some(unauthorized_message())
 }
 
-/** Validate that a string is a valid hex encoding of a 256bit hash */
+/// Validate that a string is a valid hex encoding of a 256bit hash
 fn check_hash(name: &str) -> bool {
     if name.len() != 64 {
         return false;
@@ -196,7 +219,7 @@ fn check_hash(name: &str) -> bool {
     return true;
 }
 
-/** Put a chunk into the chunk archive */
+/// Put a chunk into the chunk archive
 fn handle_put_chunk(
     bucket: String,
     chunk: String,
@@ -214,6 +237,8 @@ fn handle_put_chunk(
     if !check_hash(chunk.as_ref()) {
         return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad chunk", "");
     }
+
+    // Check if the chunk is already there.
     {
         let conn = state.conn.lock().unwrap();
         let mut stmt = conn
@@ -226,7 +251,7 @@ fn handle_put_chunk(
         }
     }
 
-    // Small chunks are stored directly in the db
+    // Read and handle content
     return Box::new(
         req.into_body()
             .fold(Vec::new(), |mut acc, chunk| {
@@ -238,13 +263,16 @@ fn handle_put_chunk(
             })
             .and_then(move |v| {
                 let len = v.len();
+                // Small content is stored directly in the DB
                 if len < SMALL_SIZE {
                     if let Err(e) = state.conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
                         params![&bucket, &chunk, v.len() as i64, &v]) {
                         return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Insert failed", e)
                     }
                 } else {
-                     if let Err(e) = std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)) {
+                    // Large content is stored on disk. We first store the data in a temp upload folder
+                    // and then atomically rename into its right location
+                    if let Err(e) = std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)) {
                         return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Could not create upload folder", e);
                     }
                     let temp_path = format!("{}/data/upload/{}/{}_{}", state.config.data_dir, bucket, chunk, rand::random::<u64>());
@@ -268,6 +296,7 @@ fn handle_put_chunk(
             }));
 }
 
+/// Get a chunk from the archive
 fn handle_get_chunk(
     bucket: String,
     chunk: String,
@@ -377,7 +406,7 @@ fn handle_delete_chunk(
                 file!(),
                 line!(),
                 StatusCode::NOT_FOUND,
-                "Missing churk",
+                "Missing chunk",
                 chunk,
             )
         }
