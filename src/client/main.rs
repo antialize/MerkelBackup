@@ -360,7 +360,6 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
                 hex::encode(&secrets.bucket),
                 root.id
             );
-            info!("URL {}", url);
             check_response(
                 client
                     .delete(&url[..])
@@ -383,7 +382,7 @@ fn main() -> Result<(), Error> {
     log::set_max_level(config.verbosity);
     debug!("Config {:?}", config);
 
-    info!("Derive secret!!\n");
+    debug!("Derive secret!!\n");
     let secrets = derive_secrets(&config.encryption_key);
     if let Some(_) = matches.subcommand_matches("backup") {
         backup::run(config, secrets)?;
