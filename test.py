@@ -88,7 +88,7 @@ cache_db="{os.path.join(test_dir, "cache.db")}"
             fi.write("test3")
         with open(f, "w") as fi:
             fi.write("x" * 1024 * 1024 * 50)
-        # os.symlink(h, i) TODO
+        os.symlink(i, h)
 
         # Backup the files and validate the files
         time.sleep(0.5)
@@ -148,7 +148,8 @@ cache_db="{os.path.join(test_dir, "cache.db")}"
             if fi.read() != "x" * 1024 * 1024 * 50:
                 raise Exception("Bad restore 5")
 
-        # TODO symlink
+        if os.readlink(os.path.join(r1, h[1:])) != i:
+            raise Exception("Bad restore link 1")
 
         # Modify state
         with open(g, "w") as fi:
@@ -242,7 +243,8 @@ cache_db="{os.path.join(test_dir, "cache.db")}"
             if fi.read() != "test4":
                 raise Exception("Bad restore 11")
 
-        # TODO symlink
+        if os.readlink(os.path.join(r1, h[1:])) != i:
+            raise Exception("Bad restore link 2")
 
         # Recreate e
         with open(e, "w") as fi:

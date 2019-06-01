@@ -238,7 +238,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
     let mut entries: Vec<DirEnt> = Vec::new();
     for entry in raw_entries {
         let path = entry?.path();
-        let md = fs::metadata(&path)?;
+        let md = fs::symlink_metadata(&path)?;
         let filename = path
             .file_name()
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
@@ -248,6 +248,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             return Err(Error::BadPath(path.to_path_buf()));
         }
         let ft = md.file_type();
+        let mode = md.st_mode() & 0xFFF;
         if ft.is_dir() {
             let (content, size) = backup_folder(&path, state)?;
             entries.push(DirEnt {
@@ -255,7 +256,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 etype: EType::Dir,
                 content,
                 size,
-                mode: md.st_mode(),
+                mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
                 atime: md.st_atime(),
@@ -273,7 +274,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 etype: EType::File,
                 content: backup_file(&path, md.len(), mtime, state)?,
                 size: md.len(),
-                mode: md.st_mode(),
+                mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
                 atime: md.st_atime(),
@@ -290,7 +291,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                     .ok_or_else(|| Error::BadPath(link.to_path_buf()))?
                     .to_string(),
                 size: 0,
-                mode: md.st_mode(),
+                mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
                 atime: md.st_atime(),
@@ -394,7 +395,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             etype: EType::Dir,
             content,
             size,
-            mode: md.st_mode(),
+            mode: md.st_mode() & 0xFFF,
             uid: md.st_uid(),
             gid: md.st_gid(),
             atime: md.st_atime(),

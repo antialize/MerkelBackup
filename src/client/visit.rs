@@ -8,7 +8,6 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -171,7 +170,7 @@ fn recover_entry(
         EType::Link => {
             debug!("LINK {:?}", dpath);
             if !dry {
-                std::os::unix::fs::symlink(&dpath, ent.chunks.first().unwrap())?;
+                std::os::unix::fs::symlink(ent.chunks.first().unwrap(), &dpath)?;
             }
             pb.add(ent.size);
         }
@@ -189,7 +188,8 @@ fn recover_entry(
             }
         }
     }
-    if !dry {
+    if !dry && ent.etype != EType::Link {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dpath, std::fs::Permissions::from_mode(ent.st_mode))?;
         if preserve_owner {
             nix::unistd::fchownat(
