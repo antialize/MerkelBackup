@@ -5,11 +5,11 @@ extern crate filetime;
 extern crate hex;
 extern crate nix;
 extern crate pbr;
+extern crate rand;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
 extern crate simple_logger;
-extern crate rand;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use crypto::blake2b::Blake2b;

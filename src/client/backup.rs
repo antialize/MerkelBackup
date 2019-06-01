@@ -2,6 +2,7 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
+use rand::Rng;
 use rusqlite::{params, Connection, Statement, NO_PARAMS};
 use shared::{check_response, Config, EType, Error, Secrets};
 use std::fs;
@@ -10,7 +11,6 @@ use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
-use rand::Rng;
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 

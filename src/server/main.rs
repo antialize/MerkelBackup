@@ -302,7 +302,15 @@ fn handle_get_chunk(
     state: Arc<State>,
     head: bool,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Put) {
+    if let Some(res) = check_auth(
+        &req,
+        state.clone(),
+        if head {
+            AccessType::Put
+        } else {
+            AccessType::Get
+        },
+    ) {
         warn!("Unauthorized access for get chunk {}/{}", bucket, chunk);
         return res;
     }
@@ -488,8 +496,8 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
 }
 
 fn handle_get_status(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Get) {
-        warn!("Unauthorized access for list chunks {}", bucket);
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Put) {
+        warn!("Unauthorized access for get status {}", bucket);
         return res;
     }
     if !check_hash(bucket.as_ref()) {
@@ -799,7 +807,6 @@ fn parse_config() -> Config {
     if let Some(cert) = matches.value_of("ssl_cert") {
         config.ssl_cert = cert.to_string();
     }
-
 
     return config;
 }

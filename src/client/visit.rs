@@ -40,7 +40,7 @@ fn get_chunk(
     let mut encrypted = Vec::with_capacity(len as usize);
     let len = res.read_to_end(&mut encrypted)?;
     if len < 12 {
-        return Err(Error::Msg("Missing nonce"))
+        return Err(Error::Msg("Missing nonce"));
     }
 
     let mut content = Vec::with_capacity(encrypted.len());
