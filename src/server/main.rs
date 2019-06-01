@@ -22,14 +22,12 @@ use futures::{future, Future};
 use hyper::header::CONTENT_LENGTH;
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use native_tls::{Identity, TlsAcceptor};
 use rusqlite::{params, Connection, NO_PARAMS};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
-
-
 
 /// Chunks smaller that this goes into the sqlite database instead of directly on disk
 const SMALL_SIZE: usize = 1024 * 128;
@@ -802,13 +800,7 @@ fn parse_config() -> Config {
         config.ssl_cert = cert.to_string();
     }
 
-    if config.ssl_cert == "" {
-        panic!("No ssl cert specified")
-    }
 
-    if config.ssl_key == "" {
-        panic!("No ssl key specified")
-    }
     return config;
 }
 
@@ -824,49 +816,62 @@ fn main() {
         config: config,
         conn: Mutex::new(conn),
     });
-
-    let cert = std::fs::read(&state.config.ssl_cert).expect("Unable to read ssl cert");
-    let cert = Identity::from_pkcs12(&cert, &state.config.ssl_key).expect("Unable to read cert");
-    let tls_cx = TlsAcceptor::builder(cert)
-        .build()
-        .expect("Uanble to set up ssl");
-    let tls_cx = tokio_tls::TlsAcceptor::from(tls_cx);
     let addr = state.config.bind.parse().expect("Bad bind address");
-    let srv = TcpListener::bind(&addr).expect("Error binding local port");
+    let bind = state.config.bind.clone();
 
-    info!("Server listening on {}", state.config.bind);
-    info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
-
-    let http_proto = Http::new();
-    let server = http_proto
-        .serve_incoming(
-            srv.incoming().and_then(move |socket| {
-                tls_cx
-                    .accept(socket)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }),
-            move || {
+    if state.config.ssl_cert == "" {
+        let server = Server::bind(&addr)
+            .serve(move || {
                 let state = state.clone();
                 service_fn(move |req| backup_serve(req, state.clone()))
-            },
-        )
-        .then(|res| match res {
-            Ok(conn) => Ok(Some(conn)),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                Ok(None)
-            }
-        })
-        .for_each(|conn_opt| {
-            if let Some(conn) = conn_opt {
-                hyper::rt::spawn(
-                    conn.and_then(|c| c.map_err(|e| panic!("Hyper error {}", e)))
-                        .map_err(|e| eprintln!("Connection error {}", e)),
-                );
-            }
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+        info!("Server listening on {}", &bind);
+        info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
+        hyper::rt::run(server);
+    } else {
+        let srv = TcpListener::bind(&addr).expect("Error binding local port");
 
-            Ok(())
-        });
+        let cert = std::fs::read(&state.config.ssl_cert).expect("Unable to read ssl cert");
+        let cert =
+            Identity::from_pkcs12(&cert, &state.config.ssl_key).expect("Unable to read cert");
+        let tls_cx = TlsAcceptor::builder(cert)
+            .build()
+            .expect("Uanble to set up ssl");
+        let tls_cx = tokio_tls::TlsAcceptor::from(tls_cx);
 
-    hyper::rt::run(server);
+        let http_proto = Http::new();
+        let server = http_proto
+            .serve_incoming(
+                srv.incoming().and_then(move |socket| {
+                    tls_cx
+                        .accept(socket)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                }),
+                move || {
+                    let state = state.clone();
+                    service_fn(move |req| backup_serve(req, state.clone()))
+                },
+            )
+            .then(|res| match res {
+                Ok(conn) => Ok(Some(conn)),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    Ok(None)
+                }
+            })
+            .for_each(|conn_opt| {
+                if let Some(conn) = conn_opt {
+                    hyper::rt::spawn(
+                        conn.and_then(|c| c.map_err(|e| panic!("Hyper error {}", e)))
+                            .map_err(|e| eprintln!("Connection error {}", e)),
+                    );
+                }
+
+                Ok(())
+            });
+        info!("Server listening on {}", &bind);
+        info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
+        hyper::rt::run(server);
+    }
 }
