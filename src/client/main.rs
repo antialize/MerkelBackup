@@ -384,51 +384,58 @@ fn main() -> Result<(), Error> {
 
     debug!("Derive secret!!\n");
     let secrets = derive_secrets(&config.encryption_key);
-    if let Some(_) = matches.subcommand_matches("backup") {
-        backup::run(config, secrets)?;
-    } else if let Some(m) = matches.subcommand_matches("validate") {
-        visit::run(
-            config,
-            secrets,
-            visit::Mode::Validate {
-                full: m.is_present("full"),
-            },
-        )?;
-    } else if let Some(m) = matches.subcommand_matches("prune") {
-        visit::run(
-            config,
-            secrets,
-            visit::Mode::Prune {
-                dry: m.is_present("dry"),
-                age: m.value_of("age").map(|f| f.parse().unwrap()),
-            },
-        )?;
-    } else if let Some(m) = matches.subcommand_matches("restore") {
-        visit::run(
-            config,
-            secrets,
-            visit::Mode::Restore {
-                root: m
-                    .value_of("root")
-                    .ok_or(Error::Msg("Missing root"))?
-                    .to_string(),
-                pattern: std::path::PathBuf::from(
-                    m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
-                ),
-                dest: std::path::PathBuf::from(
-                    m.value_of("dest").ok_or(Error::Msg("Missing dest"))?,
-                ),
-                dry: m.is_present("dry"),
-                preserve_owner: m.is_present("preserve_owner"),
-            },
-        )?;
-    } else if let Some(m) = matches.subcommand_matches("delete-root") {
-        delete_root(m.value_of("root").unwrap(), config, secrets)?;
-    } else if let Some(m) = matches.subcommand_matches("roots") {
-        list_roots(m.value_of("hostname"), config, secrets)?;
-    } else {
-        panic!("unknown subcommand");
+    let ok = {
+        if let Some(_) = matches.subcommand_matches("backup") {
+            backup::run(config, secrets)?;
+            true
+        } else if let Some(m) = matches.subcommand_matches("validate") {
+            visit::run(
+                config,
+                secrets,
+                visit::Mode::Validate {
+                    full: m.is_present("full"),
+                },
+            )?
+        } else if let Some(m) = matches.subcommand_matches("prune") {
+            visit::run(
+                config,
+                secrets,
+                visit::Mode::Prune {
+                    dry: m.is_present("dry"),
+                    age: m.value_of("age").map(|f| f.parse().unwrap()),
+                },
+            )?
+        } else if let Some(m) = matches.subcommand_matches("restore") {
+            visit::run(
+                config,
+                secrets,
+                visit::Mode::Restore {
+                    root: m
+                        .value_of("root")
+                        .ok_or(Error::Msg("Missing root"))?
+                        .to_string(),
+                    pattern: std::path::PathBuf::from(
+                        m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
+                    ),
+                    dest: std::path::PathBuf::from(
+                        m.value_of("dest").ok_or(Error::Msg("Missing dest"))?,
+                    ),
+                    dry: m.is_present("dry"),
+                    preserve_owner: m.is_present("preserve_owner"),
+                },
+            )?
+        } else if let Some(m) = matches.subcommand_matches("delete-root") {
+            delete_root(m.value_of("root").unwrap(), config, secrets)?;
+            true
+        } else if let Some(m) = matches.subcommand_matches("roots") {
+            list_roots(m.value_of("hostname"), config, secrets)?;
+            true
+        } else {
+            panic!("unknown subcommand");
+        }
+    };
+    if !ok {
+        std::process::exit(1);
     }
-
     return Ok(());
 }

@@ -299,7 +299,7 @@ pub fn roots<'a: 'b, 'b>(
     return Ok(Roots { filter, text });
 }
 
-pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
+pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> {
     let mut client = reqwest::Client::new();
 
     let mut entries: Vec<Ent> = Vec::new();
@@ -327,6 +327,8 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             None
         }
     };
+
+    let mut ok = true;
 
     for root in roots(&config, &secrets, &client, root)?.iter() {
         let root = root?;
@@ -404,6 +406,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
 
     if bad_dirs != 0 {
         error!("{} of {} dirs are bad", bad_dirs, dirs.len());
+        ok = false;
     }
 
     match &mode {
@@ -442,7 +445,10 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
                         }
                     }
                 }
-                error!("{} of {} file chunks are bad", bad_files, files.len());
+                if bad_files != 0 {
+                    error!("{} of {} file chunks are bad", bad_files, files.len());
+                    ok = false;
+                }
             }
         }
         Mode::Prune { dry, age: _ } => {
@@ -489,7 +495,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
 
             info!("Removing {} of {} chunks", remove.len(), total);
             if *dry {
-                return Ok(());
+                return Ok(ok);
             }
 
             let mut pb = ProgressBar::new(removed_size);
@@ -547,5 +553,5 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<(), Error> {
             }
         }
     }
-    Ok(())
+    Ok(ok)
 }
