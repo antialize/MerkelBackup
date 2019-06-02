@@ -1,5 +1,9 @@
 # MerkelBackup
 
+[![Travis Build Status](https://travis-ci.org/antialize/MerkelBackup.svg?branch=master)](https://travis-ci.org/antialize/MerkelBackup)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+
 MerkelBackup is a simple backup solution based on merkel trees. MerkelBackup backups are:
 * Incremental: Files are split into chunks of 64MB and only changed chunks are stored.
 * Encrypted: The data on the server is encrypted using chacha20, so that a compromise of the backup server does not leak the data.
