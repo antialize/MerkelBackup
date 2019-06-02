@@ -56,15 +56,15 @@ access_level="Delete"
         client_config = os.path.join(test_dir, "mbackup.toml")
         with open(client_config, "w") as f:
             f.write(
-                f"""
+                """
 user="backup"
 password="hunter1"
 encryption_key="correcthorsebatterystaple"
 server="http://localhost:31782"
 hostname="test"
-backup_dirs=["{in_dir}"]
-cache_db="{os.path.join(test_dir, "cache.db")}"
-"""
+backup_dirs=["%s"]
+cache_db="%s"
+"""%(in_dir, os.path.join(test_dir, "cache.db"))
             )
 
         # Create some test files and links
