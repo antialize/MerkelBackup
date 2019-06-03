@@ -200,10 +200,10 @@ fn recover_entry(
                 nix::unistd::FchownatFlags::NoFollowSymlink,
             )?;
         }
-        filetime::set_file_times(
+        nix::sys::stat::lutimes(
             &dpath,
-            filetime::FileTime::from_unix_time(ent.atime, 0),
-            filetime::FileTime::from_unix_time(ent.mtime, 0),
+            &nix::sys::time::TimeValLike::seconds(ent.atime),
+            &nix::sys::time::TimeValLike::seconds(ent.mtime),
         )?;
     }
 
