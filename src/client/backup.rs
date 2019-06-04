@@ -371,8 +371,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
 
     let dirs = state.config.backup_dirs.clone();
     for dir in dirs.iter() {
+        let path = Path::new(dir);
+        if !path.is_dir() {
+            info!("Skipping {}", &dir);
+            continue;
+        }
         info!("Scanning {}", &dir);
-        backup_folder(Path::new(dir), &mut state)?;
+        backup_folder(path, &mut state)?;
     }
 
     state.progress = Some({
@@ -385,8 +390,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     let mut entries: Vec<DirEnt> = Vec::new();
     state.scan = false;
     for dir in dirs.iter() {
-        info!("Backing up {}", &dir);
         let path = Path::new(dir);
+        if !path.is_dir() {
+            info!("Skipping {}", &dir);
+            continue;
+        }
+        info!("Backing up {}", &dir);
+
         let md = fs::metadata(&path)?;
 
         let (content, size) = backup_folder(path, &mut state)?;
