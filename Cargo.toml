@@ -1,4 +1,5 @@
 [package]
+edition = "2018"
 
 name = "mbackup"
 version = "0.1.0"

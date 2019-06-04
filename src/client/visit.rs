@@ -3,7 +3,7 @@ use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
 use pbr::ProgressBar;
-use shared::{check_response, Config, EType, Error, Secrets};
+use crate::shared::{check_response, Config, EType, Error, Secrets};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -180,7 +180,7 @@ fn recover_entry(
                 let mut file = std::fs::File::create(&dpath)?;
                 for chunk in ent.chunks.iter() {
                     let res = get_chunk(client, &config, &secrets, &chunk)?;
-                    file.write(&res)?;
+                    file.write_all(&res)?;
                     pb.add(res.len() as u64);
                 }
             } else {
@@ -207,7 +207,7 @@ fn recover_entry(
         )?;
     }
 
-    return Ok(());
+    Ok(())
 }
 
 pub struct Root<'l> {
@@ -454,7 +454,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
         Mode::Prune { dry, age: _ } => {
             let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
-            let mut content = check_response(
+            let content = check_response(
                 client
                     .get(&url[..])
                     .basic_auth(&config.user, Some(&config.password))

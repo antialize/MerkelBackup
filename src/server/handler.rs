@@ -5,9 +5,9 @@ use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::{params};
 use std::sync::{Arc};
 
-use config::{SMALL_SIZE, AccessType};
-use error::{Error, ResponseFuture};
-use state::{State};
+use crate::config::{SMALL_SIZE, AccessType};
+use crate::error::{Error, ResponseFuture};
+use crate::state::{State};
 
 /// Print an error to the terminal and return a future describing the error
 fn handle_error_i<E: std::fmt::Debug>(
@@ -20,28 +20,49 @@ fn handle_error_i<E: std::fmt::Debug>(
     if code != StatusCode::NOT_FOUND {
         error!("{}:{}: {} {} error {:?}", file, line, message, code, e);
     }
-    return future::ok(
+    future::ok(
         Response::builder()
             .status(code)
             .body(Body::from(message))
             .unwrap(),
-    );
+    )
+}
+
+/// Print an error to the terminal and return a future describing the error
+macro_rules! handle_error_i {
+    ($code:expr, $message:expr, $e:expr) => {
+        handle_error_i(file!(), line!(), $code, $message, $e)
+    };
 }
 
 /// Print an error to the terminal and return a boxed future describing the error
-fn handle_error<E: std::fmt::Debug>(
-    file: &str,
-    line: u32,
-    code: StatusCode,
-    message: &'static str,
-    e: E,
-) -> ResponseFuture {
-    return Box::new(handle_error_i(file, line, code, message, e));
+macro_rules! handle_error {
+    ($($args:expr),* $(,)?) => {
+        Box::new(handle_error_i!($($args),*))
+    };
+}
+
+macro_rules! tryfut_i {
+    ($r:expr, $code:expr, $err:expr $(,)?) => {
+        match $r {
+            Ok(v) => v,
+            Err(e) => return handle_error_i!($code, $err, e),
+        }
+    };
+}
+
+macro_rules! tryfut {
+    ($r:expr, $code:expr, $err:expr $(,)?) => {
+        match $r {
+            Ok(v) => v,
+            Err(e) => return handle_error!($code, $err, e),
+        }
+    };
 }
 
 /// Construct a http ok response
 fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>, Error> {
-    return future::ok(
+    future::ok(
         Response::builder()
             .status(StatusCode::OK)
             .body(match message {
@@ -49,17 +70,17 @@ fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>,
                 None => Body::from(""),
             })
             .unwrap(),
-    );
+    )
 }
 
 /// Construct a boxed http ok response
 fn ok_message(message: Option<String>) -> ResponseFuture {
-    return Box::new(ok_message_i(message));
+    Box::new(ok_message_i(message))
 }
 
 /// Construct an unauthorize http response
 fn unauthorized_message() -> ResponseFuture {
-    return Box::new(future::ok(
+    Box::new(future::ok(
         Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(
@@ -68,7 +89,7 @@ fn unauthorized_message() -> ResponseFuture {
             )
             .body(Body::from(""))
             .unwrap(),
-    ));
+    ))
 }
 
 /// Check if the user has an access lever greater than or equal to level
@@ -102,9 +123,9 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
 }
 
 /// Validate that a string is a valid hex encoding of a 256bit hash
-fn check_hash(name: &str) -> bool {
+fn check_hash(name: &str) -> std::result::Result<(), Error> {
     if name.len() != 64 {
-        return false;
+        return Err(Error::Server("wrong hash length"));
     }
     for c in name.chars() {
         if '0' <= c && c <= '9' {
@@ -113,9 +134,9 @@ fn check_hash(name: &str) -> bool {
         if 'a' <= c && c <= 'f' {
             continue;
         }
-        return false;
+        return Err(Error::Server("hash character not lowercase hex"));
     }
-    return true;
+    Ok(())
 }
 
 /// Put a chunk into the chunk archive
@@ -130,12 +151,8 @@ fn handle_put_chunk(
         return res;
     }
 
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
-    if !check_hash(chunk.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad chunk", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
 
     // Check if the chunk is already there.
     {
@@ -146,12 +163,12 @@ fn handle_put_chunk(
 
         let mut rows = stmt.query(params![bucket, chunk]).unwrap();
         if let Some(_) = rows.next().expect("Unable to read db row") {
-            return handle_error(file!(), line!(), StatusCode::CONFLICT, "Already there", "");
+            return handle_error!(StatusCode::CONFLICT, "Already there", "");
         }
     }
 
     // Read and handle content
-    return Box::new(
+    Box::new(
         req.into_body()
             .map_err(|e| e.into())
             .fold(Vec::new(), |mut acc, chunk| {
@@ -166,35 +183,36 @@ fn handle_put_chunk(
                 let len = v.len();
                 // Small content is stored directly in the DB
                 if len < SMALL_SIZE {
-                    if let Err(e) = state.conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
-                        params![&bucket, &chunk, v.len() as i64, &v]) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Insert failed", e)
-                    }
+                    let conn = state.conn.lock().unwrap();
+                    tryfut_i!(
+                        conn.execute(
+                            "INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
+                            params![&bucket, &chunk, v.len() as i64, &v],
+                        ),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Insert failed",
+                    );
                 } else {
                     // Large content is stored on disk. We first store the data in a temp upload folder
                     // and then atomically rename into its right location
-                    if let Err(e) = std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Could not create upload folder", e);
-                    }
+                    tryfut_i!(std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)),
+                        StatusCode::INTERNAL_SERVER_ERROR, "Could not create upload folder");
                     let temp_path = format!("{}/data/upload/{}/{}_{}", state.config.data_dir, bucket, chunk, rand::random::<u64>());
-                    if let Err(e) = std::fs::write(&temp_path, v) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR,  "Write failed", e);
-                    }
-                    if let Err(e) = state.conn.lock().unwrap().execute("INSERT INTO chunks (bucket, hash, size, time) VALUES (?, ?, ?, strftime('%s', 'now'))",
-                        params![&bucket, &chunk, len as i64]) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Insert failed", e)
-                    }
-                    if let Err(e) = std::fs::create_dir_all(format!("{}/data/{}/{}", state.config.data_dir, &bucket, &chunk[..2])) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Could not create bucket folder", e);
-                    }
-                    if let Err(e) = std::fs::rename(&temp_path, format!("{}/data/{}/{}/{}", state.config.data_dir, &bucket, &chunk[..2], &chunk[2..])) {
-                        return handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Move failed", e)
-                    }
+                    tryfut_i!(std::fs::write(&temp_path, v),
+                        StatusCode::INTERNAL_SERVER_ERROR,  "Write failed");
+                    let conn = state.conn.lock().unwrap();
+                    tryfut_i!(conn.execute("INSERT INTO chunks (bucket, hash, size, time) VALUES (?, ?, ?, strftime('%s', 'now'))",
+                        params![&bucket, &chunk, len as i64]),
+                        StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
+                    tryfut_i!(std::fs::create_dir_all(format!("{}/data/{}/{}", state.config.data_dir, &bucket, &chunk[..2])),
+                        StatusCode::INTERNAL_SERVER_ERROR, "Could not create bucket folder");
+                    tryfut_i!(std::fs::rename(&temp_path, format!("{}/data/{}/{}/{}", state.config.data_dir, &bucket, &chunk[..2], &chunk[2..])),
+                        StatusCode::INTERNAL_SERVER_ERROR, "Move failed");
                 }
                 ok_message_i(None)
             }).or_else(|e| {
-                handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Ups", e)
-            }));
+                handle_error_i!(StatusCode::INTERNAL_SERVER_ERROR, "Ups", e)
+            }))
 }
 
 /// Get a chunk from the archive
@@ -218,12 +236,8 @@ fn handle_get_chunk(
         return res;
     }
 
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
-    if !check_hash(chunk.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad chunk", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, content, size FROM chunks WHERE bucket=? AND hash=?")
@@ -238,7 +252,7 @@ fn handle_get_chunk(
             (id, content, size)
         }
         None => {
-            return handle_error(file!(), line!(), StatusCode::NOT_FOUND, "Not found", chunk);
+            return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
         }
     };
     if head {
@@ -263,25 +277,23 @@ fn handle_get_chunk(
             match std::fs::read(path) {
                 Ok(data) => data,
                 Err(e) => {
-                    return handle_error(
-                        file!(),
-                        line!(),
+                    return handle_error!(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "Chunk missing",
-                        e,
+                        e
                     )
                 }
             }
         }
     };
 
-    return Box::new(future::ok(
+    Box::new(future::ok(
         Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, size)
             .body(Body::from(content))
             .unwrap(),
-    ));
+    ))
 }
 
 fn handle_delete_chunk(
@@ -295,12 +307,8 @@ fn handle_delete_chunk(
         return res;
     }
 
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
-    if !check_hash(chunk.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad chunk", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
     let conn = state.conn.lock().unwrap();
 
     let mut stmt = conn
@@ -311,9 +319,7 @@ fn handle_delete_chunk(
     let external: bool = match rows.next().expect("Unable to read db row") {
         Some(row) => row.get_unwrap(0),
         None => {
-            return handle_error(
-                file!(),
-                line!(),
+            return handle_error!(
                 StatusCode::NOT_FOUND,
                 "Missing chunk",
                 chunk,
@@ -329,49 +335,35 @@ fn handle_delete_chunk(
             &chunk[..2],
             &chunk[2..]
         );
-        if let Err(e) = std::fs::remove_file(path) {
-            return handle_error(
-                file!(),
-                line!(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Delete failed",
-                e,
-            );
-        }
+        tryfut!(
+            std::fs::remove_file(path),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Delete failed",
+        );
     }
 
-    match conn.execute(
-        "DELETE FROM chunks WHERE bucket=? AND hash=?",
-        params![bucket, chunk],
-    ) {
-        Err(e) => {
-            return handle_error(
-                file!(),
-                line!(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Query failed",
-                e,
-            )
-        }
-        Ok(0) => return handle_error(file!(), line!(), StatusCode::NOT_FOUND, "Not found", ""),
-        Ok(_) => (),
-    };
+    let count = tryfut!(
+        conn.execute(
+            "DELETE FROM chunks WHERE bucket=? AND hash=?",
+            params![bucket, chunk],
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Query failed",
+    );
 
-    match conn.execute(
-        "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
-        params![bucket],
-    ) {
-        Err(e) => {
-            return handle_error(
-                file!(),
-                line!(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Query failed",
-                e,
-            )
-        }
-        Ok(_) => return ok_message(None),
+    if count == 0 {
+        return handle_error!(StatusCode::NOT_FOUND, "Not found", "");
     }
+
+    tryfut!(
+        conn.execute(
+            "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
+            params![bucket],
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Query failed",
+    );
+    ok_message(None)
 }
 
 fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
@@ -379,9 +371,7 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
         warn!("Unauthorized access for list chunks {}", bucket);
         return res;
     }
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
     let mut ans = "".to_string();
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -403,9 +393,7 @@ fn handle_get_status(bucket: String, req: Request<Body>, state: Arc<State>) -> R
         warn!("Unauthorized access for get status {}", bucket);
         return res;
     }
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
 
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -425,9 +413,7 @@ fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> Re
         warn!("Unauthorized access for get roots {}", bucket);
         return res;
     }
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
 
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -466,21 +452,17 @@ fn handle_put_root(
         return res;
     }
 
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
 
     if host.contains('\0') {
-        return handle_error(
-            file!(),
-            line!(),
+        return handle_error!(
             StatusCode::BAD_REQUEST,
             "Bad host name",
             "",
         );
     }
 
-    return Box::new(
+    Box::new(
         req.into_body()
             .map_err(|e| e.into())
             .fold(Vec::new(), |mut acc, chunk| {
@@ -488,20 +470,19 @@ fn handle_put_root(
                 futures::future::ok::<_, Error>(acc)
             })
             .and_then(move |v| {
-                let s = match String::from_utf8(v) {
-                    Ok(s) => s,
-                    Err(e) => return handle_error_i(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", e)
-                };
-                if !check_hash(s.as_ref()) {
-                    return handle_error_i(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-                }
-                let res = state.conn.lock().unwrap().execute("INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
-                    params![&bucket, &host, &s]);
-                match res {
-                    Ok(_) => ok_message_i(None),
-                    Err(e) => handle_error_i(file!(), line!(), StatusCode::INTERNAL_SERVER_ERROR, "Insert failed", e)
-                }
-            }));
+                let s = tryfut_i!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad bucket");
+                tryfut_i!(check_hash(s.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+                let conn = state.conn.lock().unwrap();
+                tryfut_i!(
+                    conn.execute(
+                        "INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
+                        params![&bucket, &host, &s],
+                    ),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Insert failed",
+                );
+                ok_message_i(None)
+            }))
 }
 
 fn handle_delete_root(
@@ -515,55 +496,49 @@ fn handle_delete_root(
         return res;
     }
 
-    if !check_hash(bucket.as_ref()) {
-        return handle_error(file!(), line!(), StatusCode::BAD_REQUEST, "Bad bucket", "");
-    }
+    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
 
     match state.conn.lock().unwrap().execute(
         "DELETE FROM roots WHERE bucket=? AND id=?",
         params![bucket, root],
     ) {
         Err(e) => {
-            return handle_error(
-                file!(),
-                line!(),
+            handle_error!(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Query failed",
                 e,
             )
         }
-        Ok(0) => return handle_error(file!(), line!(), StatusCode::NOT_FOUND, "Not found", ""),
-        Ok(_) => return ok_message(None),
+        Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
+        Ok(_) => ok_message(None),
     }
 }
 
 pub fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req.uri().path().split("/").map(|v| v.to_string()).collect();
     if req.method() == &Method::GET && path.len() == 3 && path[1] == "status" {
-        return handle_get_status(path[2].clone(), req, state);
+        handle_get_status(path[2].clone(), req, state)
     } else if req.method() == &Method::GET && path.len() == 4 && path[1] == "chunks" {
-        return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false);
+        handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false)
     } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "chunks" {
-        return handle_put_chunk(path[2].clone(), path[3].clone(), req, state);
+        handle_put_chunk(path[2].clone(), path[3].clone(), req, state)
     } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "chunks" {
-        return handle_delete_chunk(path[2].clone(), path[3].clone(), req, state);
+        handle_delete_chunk(path[2].clone(), path[3].clone(), req, state)
     } else if req.method() == &Method::HEAD && path.len() == 4 && path[1] == "chunks" {
-        return handle_get_chunk(path[2].clone(), path[3].clone(), req, state, true);
+        handle_get_chunk(path[2].clone(), path[3].clone(), req, state, true)
     } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "chunks" {
-        return handle_list_chunks(path[2].clone(), req, state);
+        handle_list_chunks(path[2].clone(), req, state)
     } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "roots" {
-        return handle_get_roots(path[2].clone(), req, state);
+        handle_get_roots(path[2].clone(), req, state)
     } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "roots" {
-        return handle_put_root(path[2].clone(), path[3].clone(), req, state);
+        handle_put_root(path[2].clone(), path[3].clone(), req, state)
     } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "roots" {
-        return handle_delete_root(path[2].clone(), path[3].clone(), req, state);
+        handle_delete_root(path[2].clone(), path[3].clone(), req, state)
     } else {
-        return handle_error(
-            file!(),
-            line!(),
+        handle_error!(
             StatusCode::NOT_FOUND,
             "Not found",
             req.uri(),
-        );
+        )
     }
 }

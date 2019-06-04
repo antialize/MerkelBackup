@@ -1,7 +1,7 @@
 use rusqlite::{Connection, NO_PARAMS};
 use std::sync::{Mutex};
 
-use config::Config;
+use crate::config::Config;
 
 /// The state passed around the variaus methods
 pub struct State {
