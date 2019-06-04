@@ -32,8 +32,32 @@ use tokio::net::TcpListener;
 /// Chunks smaller that this goes into the sqlite database instead of directly on disk
 const SMALL_SIZE: usize = 1024 * 128;
 
+#[derive(Debug)]
+enum Error {
+    Hyper(hyper::Error),
+    Server(&'static str),
+}
+
+impl From<hyper::Error> for Error {
+    fn from(error: hyper::Error) -> Self {
+        Error::Hyper(error)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            Error::Hyper(ref e) => write!(f, "{}", e),
+            Error::Server(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+}
+
 /// The main result type used throughout
-type ResponseFuture = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
+type ResponseFuture = Box<Future<Item = Response<Body>, Error = Error> + Send>;
 
 /// The access level required, Put is the minimal, Delete is the maximal
 #[derive(Deserialize, PartialEq, Debug)]
@@ -115,7 +139,7 @@ fn handle_error_i<E: std::fmt::Debug>(
     code: StatusCode,
     message: &'static str,
     e: E,
-) -> future::FutureResult<Response<Body>, hyper::Error> {
+) -> future::FutureResult<Response<Body>, Error> {
     if code != StatusCode::NOT_FOUND {
         error!("{}:{}: {} {} error {:?}", file, line, message, code, e);
     }
@@ -139,7 +163,7 @@ fn handle_error<E: std::fmt::Debug>(
 }
 
 /// Construct a http ok response
-fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>, hyper::Error> {
+fn ok_message_i(message: Option<String>) -> future::FutureResult<Response<Body>, Error> {
     return future::ok(
         Response::builder()
             .status(StatusCode::OK)
@@ -252,12 +276,14 @@ fn handle_put_chunk(
     // Read and handle content
     return Box::new(
         req.into_body()
+            .map_err(|e| e.into())
             .fold(Vec::new(), |mut acc, chunk| {
                 acc.extend_from_slice(&*chunk);
                 if acc.len() > 1024*1024*1024 {
-                    //TODO return an error somehow
+                    futures::future::err(Error::Server("Content too large!"))
+                } else {
+                    futures::future::ok(acc)
                 }
-                futures::future::ok::<_, hyper::Error>(acc)
             })
             .and_then(move |v| {
                 let len = v.len();
@@ -579,9 +605,10 @@ fn handle_put_root(
 
     return Box::new(
         req.into_body()
+            .map_err(|e| e.into())
             .fold(Vec::new(), |mut acc, chunk| {
                 acc.extend_from_slice(&*chunk);
-                futures::future::ok::<_, hyper::Error>(acc)
+                futures::future::ok::<_, Error>(acc)
             })
             .and_then(move |v| {
                 let s = match String::from_utf8(v) {
