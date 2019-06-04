@@ -5,7 +5,7 @@ use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::{params};
 use std::sync::{Arc};
 
-use config::{SMALL_SIZE, AccessType, access_level};
+use config::{SMALL_SIZE, AccessType};
 use error::{Error, ResponseFuture};
 use state::{State};
 
@@ -93,7 +93,7 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
         {
             continue;
         }
-        if access_level(&user.access_level) >= access_level(&level) {
+        if user.access_level >= level {
             return None;
         }
     }

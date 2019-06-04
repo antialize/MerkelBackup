@@ -13,11 +13,17 @@ pub enum AccessType {
 }
 
 /// Convert an access lever to a number for comparison
-pub fn access_level(access_type: &AccessType) -> u8 {
+fn access_level(access_type: &AccessType) -> u8 {
     match access_type {
         AccessType::Put => 0,
         AccessType::Get => 1,
         AccessType::Delete => 2,
+    }
+}
+
+impl std::cmp::PartialOrd for AccessType {
+    fn partial_cmp(&self, other: &AccessType) -> Option<std::cmp::Ordering> {
+        access_level(self).partial_cmp(&access_level(other))
     }
 }
 
@@ -135,9 +141,7 @@ pub fn parse_config() -> Config {
                 }
             }
         }
-        None => Config {
-            ..Default::default()
-        },
+        None => Default::default(),
     };
 
     match matches.value_of("verbosity") {
@@ -164,5 +168,5 @@ pub fn parse_config() -> Config {
         config.ssl_cert = cert.to_string();
     }
 
-    return config;
+    config
 }
