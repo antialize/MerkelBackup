@@ -27,17 +27,17 @@ data_dir = "/var/mbackup"
 ssl_cert = "/etc/cert.pxf"
 ssl_key = "hunter1"
 
-[[user]]
+[[users]]
 name = "backup"
 password = "hunter2"
 access_level = "Put"
 
-[[user]]
+[[users]]
 name = "recover"
 password = "hunter3"
 access_level = "Get"
 
-[[user]]
+[[users]]
 name = "admin"
 password = "hunter4"
 access_level = "Delete"
@@ -46,7 +46,7 @@ access_level = "Delete"
 Make sure that `/etc/cert.pxf` is a valid DER-formatted PKCS #12 archive for the host the backup server is running on,
 and that `ssl_key` is the key the certificiate is encrypted with. To generate a .pfx from an openssl certificate run
 ```sh
-openssl pkcs12 -export -out identity.pfx -inkey key.pem -in cert.pem -certfile chain_certs.pem
+openssl pkcs12 -export -out cert.pfx -inkey key.pem -in cert.pem -certfile chain_certs.pem
 ```
 
 Also make sure that the `/var/mbackup` directory exists and is writable by whatever user you want the server to run as.
