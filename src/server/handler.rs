@@ -2,12 +2,12 @@ use futures::Stream;
 use futures::{future, Future};
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use rusqlite::{params};
-use std::sync::{Arc};
+use rusqlite::params;
+use std::sync::Arc;
 
-use crate::config::{SMALL_SIZE, AccessType};
+use crate::config::{AccessType, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture};
-use crate::state::{State};
+use crate::state::State;
 
 /// Print an error to the terminal and return a future describing the error
 fn handle_error_i<E: std::fmt::Debug>(
@@ -151,8 +151,16 @@ fn handle_put_chunk(
         return res;
     }
 
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
-    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+    tryfut!(
+        check_hash(chunk.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad chunk"
+    );
 
     // Check if the chunk is already there.
     {
@@ -236,8 +244,16 @@ fn handle_get_chunk(
         return res;
     }
 
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
-    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+    tryfut!(
+        check_hash(chunk.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad chunk"
+    );
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, content, size FROM chunks WHERE bucket=? AND hash=?")
@@ -277,11 +293,7 @@ fn handle_get_chunk(
             match std::fs::read(path) {
                 Ok(data) => data,
                 Err(e) => {
-                    return handle_error!(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Chunk missing",
-                        e
-                    )
+                    return handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing", e)
                 }
             }
         }
@@ -307,8 +319,16 @@ fn handle_delete_chunk(
         return res;
     }
 
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
-    tryfut!(check_hash(chunk.as_ref()), StatusCode::BAD_REQUEST, "Bad chunk");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+    tryfut!(
+        check_hash(chunk.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad chunk"
+    );
     let conn = state.conn.lock().unwrap();
 
     let mut stmt = conn
@@ -318,13 +338,7 @@ fn handle_delete_chunk(
     let mut rows = stmt.query(params![bucket, chunk]).unwrap();
     let external: bool = match rows.next().expect("Unable to read db row") {
         Some(row) => row.get_unwrap(0),
-        None => {
-            return handle_error!(
-                StatusCode::NOT_FOUND,
-                "Missing chunk",
-                chunk,
-            )
-        }
+        None => return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", chunk,),
     };
 
     if external {
@@ -371,7 +385,11 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
         warn!("Unauthorized access for list chunks {}", bucket);
         return res;
     }
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
     let mut ans = "".to_string();
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -393,7 +411,11 @@ fn handle_get_status(bucket: String, req: Request<Body>, state: Arc<State>) -> R
         warn!("Unauthorized access for get status {}", bucket);
         return res;
     }
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
 
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -413,7 +435,11 @@ fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> Re
         warn!("Unauthorized access for get roots {}", bucket);
         return res;
     }
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
 
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -452,14 +478,14 @@ fn handle_put_root(
         return res;
     }
 
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
 
     if host.contains('\0') {
-        return handle_error!(
-            StatusCode::BAD_REQUEST,
-            "Bad host name",
-            "",
-        );
+        return handle_error!(StatusCode::BAD_REQUEST, "Bad host name", "",);
     }
 
     Box::new(
@@ -496,19 +522,17 @@ fn handle_delete_root(
         return res;
     }
 
-    tryfut!(check_hash(bucket.as_ref()), StatusCode::BAD_REQUEST, "Bad bucket");
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
 
     match state.conn.lock().unwrap().execute(
         "DELETE FROM roots WHERE bucket=? AND id=?",
         params![bucket, root],
     ) {
-        Err(e) => {
-            handle_error!(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Query failed",
-                e,
-            )
-        }
+        Err(e) => handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Query failed", e,),
         Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
         Ok(_) => ok_message(None),
     }
@@ -535,10 +559,6 @@ pub fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "roots" {
         handle_delete_root(path[2].clone(), path[3].clone(), req, state)
     } else {
-        handle_error!(
-            StatusCode::NOT_FOUND,
-            "Not found",
-            req.uri(),
-        )
+        handle_error!(StatusCode::NOT_FOUND, "Not found", req.uri(),)
     }
 }

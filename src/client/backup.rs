@@ -61,12 +61,16 @@ fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
 }
 
 fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
+    let now = std::time::Instant::now();
     let mut hasher = Blake2b::new(256 / 8);
     hasher.input(&state.secrets.seed);
     hasher.input(content);
     let hash = hasher.result_str().to_string();
-
-    if !has_chunk(&hash, state)? {
+    let t0 = now.elapsed().as_millis();
+    let hc = !has_chunk(&hash, state)?;
+    let t1 = now.elapsed().as_millis();
+    let mut t2 = t1;
+    if hc {
         let url = format!(
             "{}/chunks/{}/{}",
             &state.config.server,
@@ -80,7 +84,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
 
         crypto::chacha20::ChaCha20::new(&state.secrets.key, &crypted[..12])
             .process(content, &mut crypted[12..]);
-
+        t2 = now.elapsed().as_millis();
         check_response(
             state
                 .client
@@ -90,19 +94,31 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
                 .send()?,
         )?;
     }
-
+    let t3 = now.elapsed().as_millis();
     state.update_remote_stmt.execute(params![hash])?;
 
     if let Some(p) = &mut state.progress {
         p.add(content.len() as u64);
     }
+    let t4 = now.elapsed().as_millis();
+    debug!(
+        "Put chunk; chunk: {}, size: {}, hash: {}, head: {}, crypt: {} put: {}, insert: {}",
+        hash,
+        content.len(),
+        t0,
+        t1 - t0,
+        t2 - t1,
+        t3 - t2,
+        t4 - t3
+    );
     return Ok(hash);
 }
 
 fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<String, Error> {
     let path_str = path.to_str().ok_or(Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
-        p.message(&format!("{} ", path_str));
+        let start = i64::max(0, path_str.len() as i64 - 40) as usize;
+        p.message(&format!("{} ", &path_str[start..]));
     }
 
     // IF the file is empty we just do nothing
@@ -386,6 +402,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         let mut p = ProgressBar::new(state.transfer_bytes);
         p.set_max_refresh_rate(Some(Duration::from_millis(500)));
         p.set_units(pbr::Units::Bytes);
+        p.set_width(Some(140));
         p
     });
 

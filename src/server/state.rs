@@ -1,5 +1,5 @@
 use rusqlite::{Connection, NO_PARAMS};
-use std::sync::{Mutex};
+use std::sync::Mutex;
 
 use crate::config::Config;
 

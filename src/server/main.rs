@@ -16,22 +16,22 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 
+use futures::Future;
 use futures::Stream;
-use futures::{Future};
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
-use hyper::{Server};
+use hyper::Server;
 use native_tls::{Identity, TlsAcceptor};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
-mod error;
 mod config;
+mod error;
 use config::parse_config;
 mod handler;
 use handler::backup_serve;
 mod state;
-use state::{State, setup_db};
+use state::{setup_db, State};
 
 fn main() {
     simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
