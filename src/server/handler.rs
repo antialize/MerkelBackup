@@ -17,9 +17,9 @@ fn handle_error_i<E: std::fmt::Debug>(
     message: &'static str,
     e: E,
 ) -> future::FutureResult<Response<Body>, Error> {
-    if code != StatusCode::NOT_FOUND {
-        error!("{}:{}: {} {} error {:?}", file, line, message, code, e);
-    }
+    //if code != StatusCode::NOT_FOUND {
+    error!("{}:{}: {} {} error {:?}", file, line, message, code, e);
+    //}
     future::ok(
         Response::builder()
             .status(code)
@@ -217,6 +217,7 @@ fn handle_put_chunk(
                     tryfut_i!(std::fs::rename(&temp_path, format!("{}/data/{}/{}/{}", state.config.data_dir, &bucket, &chunk[..2], &chunk[2..])),
                         StatusCode::INTERNAL_SERVER_ERROR, "Move failed");
                 }
+                info!("{}:{}: put chunk {} success", file!(), line!(), chunk);
                 ok_message_i(None)
             }).or_else(|e| {
                 handle_error_i!(StatusCode::INTERNAL_SERVER_ERROR, "Ups", e)
@@ -272,6 +273,7 @@ fn handle_get_chunk(
         }
     };
     if head {
+        info!("{}:{}: head chunk {} success", file!(), line!(), chunk);
         return Box::new(future::ok(
             Response::builder()
                 .status(StatusCode::OK)
@@ -299,6 +301,7 @@ fn handle_get_chunk(
         }
     };
 
+    info!("{}:{}: get chunk {} success", file!(), line!(), chunk);
     Box::new(future::ok(
         Response::builder()
             .status(StatusCode::OK)

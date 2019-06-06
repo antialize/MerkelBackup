@@ -31,7 +31,14 @@ struct State<'a> {
     rng: rand::rngs::OsRng,
 }
 
-fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
+#[derive(PartialEq)]
+enum HasChunkResult {
+    YesCached,
+    Yes,
+    No,
+}
+
+fn has_chunk(chunk: &str, state: &mut State, size:Option<usize>) -> Result<HasChunkResult, Error> {
     let cnt: i64 = state
         .has_remote_stmt
         .query(params![chunk, state.last_delete])?
@@ -39,7 +46,14 @@ fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
         .ok_or(Error::MissingRow())?
         .get(0)?;
     if cnt == 1 {
-        return Ok(true);
+        return Ok(HasChunkResult::YesCached);
+    }
+
+    // For small chunks it is quicker to just reupload
+    if let Some(size) = size {
+       if size < 1024*16 {
+            return Ok(HasChunkResult::No);
+       }
     }
 
     let url = format!(
@@ -54,8 +68,8 @@ fn has_chunk(chunk: &str, state: &mut State) -> Result<bool, Error> {
         .basic_auth(&state.config.user, Some(&state.config.password))
         .send()?;
     match res.status() {
-        reqwest::StatusCode::OK => Ok(true),
-        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        reqwest::StatusCode::OK => Ok(HasChunkResult::Yes),
+        reqwest::StatusCode::NOT_FOUND => Ok(HasChunkResult::No),
         code => Err(Error::HttpStatus(code)),
     }
 }
@@ -67,10 +81,10 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     hasher.input(content);
     let hash = hasher.result_str().to_string();
     let t0 = now.elapsed().as_millis();
-    let hc = !has_chunk(&hash, state)?;
+    let hc = has_chunk(&hash, state, Some(content.len()))?;
     let t1 = now.elapsed().as_millis();
     let mut t2 = t1;
-    if hc {
+    if hc == HasChunkResult::No {
         let url = format!(
             "{}/chunks/{}/{}",
             &state.config.server,
@@ -85,18 +99,26 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         crypto::chacha20::ChaCha20::new(&state.secrets.key, &crypted[..12])
             .process(content, &mut crypted[12..]);
         t2 = now.elapsed().as_millis();
-        check_response(
-            state
+
+        let res = state
                 .client
                 .put(&url[..])
                 .basic_auth(&state.config.user, Some(&state.config.password))
                 .body(reqwest::Body::from(crypted))
-                .send()?,
-        )?;
+                .send()?;
+        match res.status() {
+        reqwest::StatusCode::OK => (),
+        reqwest::StatusCode::CONFLICT => {
+            error!("Conflict in upload");
+            ()
+        },
+        code => return Err(Error::HttpStatus(code))
+        }
     }
     let t3 = now.elapsed().as_millis();
-    state.update_remote_stmt.execute(params![hash])?;
-
+    if hc != HasChunkResult::YesCached {
+        state.update_remote_stmt.execute(params![hash])?;
+    }
     if let Some(p) = &mut state.progress {
         p.add(content.len() as u64);
     }
@@ -141,7 +163,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         if let Some(chunks) = chunks {
             let mut good = true;
             for chunk in chunks.split(',') {
-                if !has_chunk(chunk, state)? {
+                if has_chunk(chunk, state, None)? == HasChunkResult::No {
                     good = false;
                     break;
                 }
