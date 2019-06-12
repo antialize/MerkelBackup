@@ -290,24 +290,24 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         }
 
         if let Some(v) = m.values_of("dir") {
-            config.backup_dirs = v.map(|v| v.to_string()).collect();
+            config.backup_dirs = v.map(std::string::ToString::to_string).collect();
         }
         if config.backup_dirs.is_empty() {
             return Err(Error::Msg("No backup dirs specified"));
         }
-    } else if let Some(_) = matches.subcommand_matches("validate") {
     } else if let Some(m) = matches.subcommand_matches("prune") {
         if let Some(v) = m.value_of("age") {
             let _: u32 = v.parse()?;
         }
-    } else if let Some(_) = matches.subcommand_matches("roots") {
-    } else if let Some(_) = matches.subcommand_matches("restore") {
-    } else if let Some(_) = matches.subcommand_matches("delete-root") {
+    } else if matches.subcommand_matches("roots").is_some()
+        || matches.subcommand_matches("validate").is_some()
+        || matches.subcommand_matches("restore").is_some()
+        || matches.subcommand_matches("delete-root").is_some()
+    {
     } else {
         return Err(Error::Msg("No sub command specified"));
     }
-
-    return Ok((config, matches));
+    Ok((config, matches))
 }
 
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
@@ -319,7 +319,7 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
             .basic_auth(&config.user, Some(&config.password))
             .send()?,
     )?;
-    println!("{:5} {:12} {}", "ID", "HOST", "TIME");
+    println!("{:5} {:12} TIME", "ID", "HOST");
 
     for row in res.text().expect("utf-8").split("\0\0") {
         if row.is_empty() {
@@ -341,7 +341,6 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
             NaiveDateTime::from_timestamp(time, 0)
         );
     }
-
     Ok(())
 }
 
@@ -370,7 +369,7 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
             error!("Could not find root {}", root);
         }
     }
-    return Ok(());
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -384,7 +383,7 @@ fn main() -> Result<(), Error> {
     debug!("Derive secret!!\n");
     let secrets = derive_secrets(&config.encryption_key);
     let ok = {
-        if let Some(_) = matches.subcommand_matches("backup") {
+        if matches.subcommand_matches("backup").is_some() {
             backup::run(config, secrets)?;
             true
         } else if let Some(m) = matches.subcommand_matches("validate") {
@@ -436,5 +435,5 @@ fn main() -> Result<(), Error> {
     if !ok {
         std::process::exit(1);
     }
-    return Ok(());
+    Ok(())
 }

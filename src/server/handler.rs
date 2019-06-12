@@ -170,7 +170,7 @@ fn handle_put_chunk(
             .unwrap();
 
         let mut rows = stmt.query(params![bucket, chunk]).unwrap();
-        if let Some(_) = rows.next().expect("Unable to read db row") {
+        if rows.next().expect("Unable to read db row").is_some() {
             return handle_error!(StatusCode::CONFLICT, "Already there", "");
         }
     }
@@ -178,7 +178,7 @@ fn handle_put_chunk(
     // Read and handle content
     Box::new(
         req.into_body()
-            .map_err(|e| e.into())
+            .map_err(std::convert::Into::into)
             .fold(Vec::new(), |mut acc, chunk| {
                 acc.extend_from_slice(&*chunk);
                 if acc.len() > 1024*1024*1024 {
@@ -493,7 +493,7 @@ fn handle_put_root(
 
     Box::new(
         req.into_body()
-            .map_err(|e| e.into())
+            .map_err(std::convert::Into::into)
             .fold(Vec::new(), |mut acc, chunk| {
                 acc.extend_from_slice(&*chunk);
                 futures::future::ok::<_, Error>(acc)
@@ -542,24 +542,29 @@ fn handle_delete_root(
 }
 
 pub fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    let path: Vec<String> = req.uri().path().split("/").map(|v| v.to_string()).collect();
-    if req.method() == &Method::GET && path.len() == 3 && path[1] == "status" {
+    let path: Vec<String> = req
+        .uri()
+        .path()
+        .split('/')
+        .map(std::string::ToString::to_string)
+        .collect();
+    if req.method() == Method::GET && path.len() == 3 && path[1] == "status" {
         handle_get_status(path[2].clone(), req, state)
-    } else if req.method() == &Method::GET && path.len() == 4 && path[1] == "chunks" {
+    } else if req.method() == Method::GET && path.len() == 4 && path[1] == "chunks" {
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false)
-    } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "chunks" {
+    } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "chunks" {
         handle_put_chunk(path[2].clone(), path[3].clone(), req, state)
-    } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "chunks" {
+    } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "chunks" {
         handle_delete_chunk(path[2].clone(), path[3].clone(), req, state)
-    } else if req.method() == &Method::HEAD && path.len() == 4 && path[1] == "chunks" {
+    } else if req.method() == Method::HEAD && path.len() == 4 && path[1] == "chunks" {
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, true)
-    } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "chunks" {
+    } else if req.method() == Method::GET && path.len() == 3 && path[1] == "chunks" {
         handle_list_chunks(path[2].clone(), req, state)
-    } else if req.method() == &Method::GET && path.len() == 3 && path[1] == "roots" {
+    } else if req.method() == Method::GET && path.len() == 3 && path[1] == "roots" {
         handle_get_roots(path[2].clone(), req, state)
-    } else if req.method() == &Method::PUT && path.len() == 4 && path[1] == "roots" {
+    } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "roots" {
         handle_put_root(path[2].clone(), path[3].clone(), req, state)
-    } else if req.method() == &Method::DELETE && path.len() == 4 && path[1] == "roots" {
+    } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "roots" {
         handle_delete_root(path[2].clone(), path[3].clone(), req, state)
     } else {
         handle_error!(StatusCode::NOT_FOUND, "Not found", req.uri(),)

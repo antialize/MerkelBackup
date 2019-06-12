@@ -57,5 +57,5 @@ pub fn setup_db(conf: &Config) -> Connection {
     )
     .expect("Unable to deletes cache table");
 
-    return conn;
+    conn
 }

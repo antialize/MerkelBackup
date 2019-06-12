@@ -110,7 +110,6 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
             reqwest::StatusCode::OK => (),
             reqwest::StatusCode::CONFLICT => {
                 error!("Conflict in upload");
-                ()
             }
             code => return Err(Error::HttpStatus(code)),
         }
@@ -133,11 +132,13 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         t3 - t2,
         t4 - t3
     );
-    return Ok(hash);
+    Ok(hash)
 }
 
 fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<String, Error> {
-    let path_str = path.to_str().ok_or(Error::BadPath(path.to_path_buf()))?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
         let start = i64::max(0, path_str.len() as i64 - 40) as usize;
         p.message(&format!("{} ", &path_str[start..]));
@@ -198,7 +199,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
             break;
         }
 
-        if chunks.len() != 0 {
+        if !chunks.is_empty() {
             chunks.push_str(&",");
         }
         chunks.push_str(&push_chunk(&buffer[..used], state)?);
@@ -216,8 +217,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         mtime as i64,
         &chunks
     ])?;
-
-    return Ok(chunks);
+    Ok(chunks)
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -256,10 +256,10 @@ fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64
             ent.ctime,
         ));
     }
-    return Ok((
+    Ok((
         push_chunk(ans.as_bytes(), state)?,
         ans.as_bytes().len() as u64,
-    ));
+    ))
 }
 
 fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
@@ -270,7 +270,7 @@ fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
         }
         ans += ent.name.len() + 25 + ent.content.len()
     }
-    return ans as u64;
+    ans as u64
 }
 
 fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> {
@@ -284,7 +284,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
             .to_str()
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
-        if filename.contains("\0") {
+        if filename.contains('\0') {
             return Err(Error::BadPath(path.to_path_buf()));
         }
         let ft = md.file_type();
@@ -340,12 +340,13 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
             });
         }
     }
+
     if state.scan {
         let size = bytes_ents(entries);
         state.transfer_bytes += size;
-        return Ok(("00000000000000000000000000000000".to_string(), size));
+        Ok(("00000000000000000000000000000000".to_string(), size))
     } else {
-        return push_ents(entries, state);
+        push_ents(entries, state)
     }
 }
 
