@@ -420,13 +420,15 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         backup_folder(path, &mut state)?;
     }
 
-    state.progress = Some({
-        let mut p = ProgressBar::new(state.transfer_bytes);
-        p.set_max_refresh_rate(Some(Duration::from_millis(500)));
-        p.set_units(pbr::Units::Bytes);
-        p.set_width(Some(140));
-        p
-    });
+    if state.config.verbosity >= log::LevelFilter::Info {
+        state.progress = Some({
+            let mut p = ProgressBar::new(state.transfer_bytes);
+            p.set_max_refresh_rate(Some(Duration::from_millis(500)));
+            p.set_units(pbr::Units::Bytes);
+            p.set_width(Some(140));
+            p
+        });
+    }
 
     let mut entries: Vec<DirEnt> = Vec::new();
     state.scan = false;
