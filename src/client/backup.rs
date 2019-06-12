@@ -38,7 +38,7 @@ enum HasChunkResult {
     No,
 }
 
-fn has_chunk(chunk: &str, state: &mut State, size:Option<usize>) -> Result<HasChunkResult, Error> {
+fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasChunkResult, Error> {
     let cnt: i64 = state
         .has_remote_stmt
         .query(params![chunk, state.last_delete])?
@@ -51,9 +51,9 @@ fn has_chunk(chunk: &str, state: &mut State, size:Option<usize>) -> Result<HasCh
 
     // For small chunks it is quicker to just reupload
     if let Some(size) = size {
-       if size < 1024*16 {
+        if size < 1024 * 16 {
             return Ok(HasChunkResult::No);
-       }
+        }
     }
 
     let url = format!(
@@ -101,18 +101,18 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         t2 = now.elapsed().as_millis();
 
         let res = state
-                .client
-                .put(&url[..])
-                .basic_auth(&state.config.user, Some(&state.config.password))
-                .body(reqwest::Body::from(crypted))
-                .send()?;
+            .client
+            .put(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .body(reqwest::Body::from(crypted))
+            .send()?;
         match res.status() {
-        reqwest::StatusCode::OK => (),
-        reqwest::StatusCode::CONFLICT => {
-            error!("Conflict in upload");
-            ()
-        },
-        code => return Err(Error::HttpStatus(code))
+            reqwest::StatusCode::OK => (),
+            reqwest::StatusCode::CONFLICT => {
+                error!("Conflict in upload");
+                ()
+            }
+            code => return Err(Error::HttpStatus(code)),
         }
     }
     let t3 = now.elapsed().as_millis();
