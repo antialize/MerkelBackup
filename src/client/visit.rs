@@ -140,7 +140,7 @@ fn row_ent(path: &PathBuf, row: &str, mode: &Mode) -> Result<Option<Ent>, Error>
 }
 
 fn recover_entry(
-    pb: &mut ProgressBar<std::io::Stdout>,
+    pb: &mut Option<ProgressBar<std::io::Stdout>>,
     ent: &Ent,
     dry: bool,
     dest: &PathBuf,
@@ -149,7 +149,9 @@ fn recover_entry(
     config: &Config,
     secrets: &Secrets,
 ) -> Result<(), Error> {
-    pb.message(&format!("{:?}: ", &ent.path));
+    if let Some(pb) = pb {
+        pb.message(&format!("{:?}: ", &ent.path));
+    }
     let dpath = dest.join(
         ent.path
             .strip_prefix("/")
@@ -161,14 +163,18 @@ fn recover_entry(
             if !dry {
                 std::fs::create_dir_all(&dpath)?;
             }
-            pb.add(ent.size);
+            if let Some(pb) = pb {
+                pb.add(ent.size);
+            }
         }
         EType::Link => {
             debug!("LINK {:?}", dpath);
             if !dry {
                 std::os::unix::fs::symlink(ent.chunks.first().unwrap(), &dpath)?;
             }
-            pb.add(ent.size);
+            if let Some(pb) = pb {
+                pb.add(ent.size);
+            }
         }
         EType::File => {
             debug!("FILE {:?}", dpath);
@@ -177,9 +183,11 @@ fn recover_entry(
                 for chunk in ent.chunks.iter() {
                     let res = get_chunk(client, &config, &secrets, &chunk)?;
                     file.write_all(&res)?;
-                    pb.add(res.len() as u64);
+                    if let Some(pb) = pb {
+                        pb.add(res.len() as u64);
+                    }
                 }
-            } else {
+            } else if let Some(pb) = pb {
                 pb.add(ent.size);
             }
         }
@@ -313,12 +321,20 @@ fn full_validate(
         }
         bytes += ent.size;
     }
-    let mut pb = ProgressBar::new(bytes);
-    pb.set_units(pbr::Units::Bytes);
-    pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+
+    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+        let mut pb = ProgressBar::new(bytes);
+        pb.set_units(pbr::Units::Bytes);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        Some(pb)
+    } else {
+        None
+    };
     let mut bad_files: usize = 0;
     for (hash, (idx, path)) in files.iter() {
-        pb.message(&format!("{:?}:{} ", path, idx));
+        if let Some(pb) = &mut pb {
+            pb.message(&format!("{:?}:{} ", path, idx));
+        }
         if hash == &"empty" {
             continue;
         }
@@ -331,9 +347,14 @@ fn full_validate(
                 );
             }
             Ok(v) => {
-                pb.add(v.len() as u64);
+                if let Some(pb) = &mut pb {
+                    pb.add(v.len() as u64);
+                }
             }
         }
+    }
+    if let Some(pb) = &mut pb {
+        pb.finish();
     }
     if bad_files != 0 {
         error!("{} of {} file chunks are bad", bad_files, files.len());
@@ -397,11 +418,19 @@ fn prune(
         return Ok(());
     }
 
-    let mut pb = ProgressBar::new(removed_size);
-    pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
-    pb.set_units(pbr::Units::Bytes);
+    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+        let mut pb = ProgressBar::new(removed_size);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        pb.set_units(pbr::Units::Bytes);
+        Some(pb)
+    } else {
+        None
+    };
+
     for (idx, (chunk, size)) in remove.iter().enumerate() {
-        pb.message(&format!("Chunk {} / {}: ", idx + 1, remove.len()));
+        if let Some(pb) = &mut pb {
+            pb.message(&format!("Chunk {} / {}: ", idx + 1, remove.len()));
+        }
 
         let url = format!(
             "{}/chunks/{}/{}",
@@ -417,9 +446,14 @@ fn prune(
                 .send()?,
         )?;
 
-        pb.add(*size);
+        if let Some(pb) = &mut pb {
+            pb.add(*size);
+        }
     }
-    pb.finish();
+
+    if let Some(pb) = &mut pb {
+        pb.finish();
+    }
 
     Ok(())
 }
@@ -544,9 +578,14 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                 return Err(Error::Msg("Root not found"));
             }
             let bytes = entries.iter().map(|e| e.size).sum();
-            let mut pb = ProgressBar::new(bytes);
-            pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
-            pb.set_units(pbr::Units::Bytes);
+            let mut pb = if config.verbosity >= log::LevelFilter::Info {
+                let mut pb = ProgressBar::new(bytes);
+                pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+                pb.set_units(pbr::Units::Bytes);
+                Some(pb)
+            } else {
+                None
+            };
             for ent in entries {
                 if let Err(e) = recover_entry(
                     &mut pb,
