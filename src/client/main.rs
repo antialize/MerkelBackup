@@ -313,12 +313,12 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
     let client = reqwest::Client::new();
     let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
-    let mut res = check_response(
+    let mut res = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
-            .send()?,
-    )?;
+            .send()
+    })?;
     println!("{:5} {:12} TIME", "ID", "HOST");
 
     for row in res.text().expect("utf-8").split("\0\0") {
@@ -358,12 +358,12 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
                 hex::encode(&secrets.bucket),
                 root.id
             );
-            check_response(
+            check_response(&mut || {
                 client
                     .delete(&url[..])
                     .basic_auth(&config.user, Some(&config.password))
-                    .send()?,
-            )?;
+                    .send()
+            })?;
         }
         None => {
             error!("Could not find root {}", root);

@@ -28,12 +28,12 @@ fn get_chunk(
         &hash
     );
 
-    let mut res = check_response(
+    let mut res = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
-            .send()?,
-    )?;
+            .send()
+    })?;
 
     let len = res.content_length().unwrap_or(0);
     let mut encrypted = Vec::with_capacity(len as usize);
@@ -293,12 +293,12 @@ pub fn roots<'a: 'b, 'b>(
     filter: Option<&'a str>,
 ) -> Result<Roots<'b>, Error> {
     let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
-    let mut res = check_response(
+    let mut res = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
-            .send()?,
-    )?;
+            .send()
+    })?;
 
     let text = res.text().expect("utf-8");
     Ok(Roots { filter, text })
@@ -374,12 +374,12 @@ fn prune(
 ) -> Result<(), Error> {
     let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
-    let content = check_response(
+    let content = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
-            .send()?,
-    )?
+            .send()
+    })?
     .text()?;
 
     let mut used: HashSet<&str> = HashSet::new();
@@ -439,12 +439,12 @@ fn prune(
             chunk
         );
 
-        check_response(
+        check_response(&mut || {
             client
                 .delete(&url[..])
                 .basic_auth(&config.user, Some(&config.password))
-                .send()?,
-        )?;
+                .send()
+        })?;
 
         if let Some(pb) = &mut pb {
             pb.add(*size);
@@ -500,12 +500,12 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                             hex::encode(&secrets.bucket),
                             root.id
                         );
-                        check_response(
+                        check_response(&mut || {
                             client
                                 .delete(&url[..])
                                 .basic_auth(&config.user, Some(&config.password))
-                                .send()?,
-                        )?;
+                                .send()
+                        })?;
                     }
                     continue;
                 }

@@ -145,7 +145,39 @@ impl From<nix::Error> for Error {
     }
 }
 
-pub fn check_response(res: reqwest::Response) -> Result<reqwest::Response, Error> {
+pub fn retry<F>(f: &mut F) -> Result<reqwest::Response, reqwest::Error>
+where
+    F: FnMut() -> Result<reqwest::Response, reqwest::Error>,
+{
+    for sleep in [5, 20, 60, 120].iter() {
+        match f() {
+            Ok(res) => {
+                if match res.status() {
+                    reqwest::StatusCode::REQUEST_TIMEOUT => false,
+                    reqwest::StatusCode::TOO_MANY_REQUESTS => false,
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR => false,
+                    reqwest::StatusCode::BAD_GATEWAY => false,
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE => false,
+                    reqwest::StatusCode::GATEWAY_TIMEOUT => false,
+                    _ => true,
+                } {
+                    return Ok(res);
+                } else {
+                    warn!("Request failed, retrying {}", res.status());
+                }
+            }
+            Err(e) => warn!("Request failed, retrying {:?}", e),
+        };
+        std::thread::sleep(std::time::Duration::from_secs(*sleep));
+    }
+    return f();
+}
+
+pub fn check_response<F>(f: &mut F) -> Result<reqwest::Response, Error>
+where
+    F: FnMut() -> Result<reqwest::Response, reqwest::Error>,
+{
+    let res = retry(f)?;
     match res.status() {
         reqwest::StatusCode::OK => Ok(res),
         code => Err(Error::HttpStatus(code)),

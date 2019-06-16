@@ -12,7 +12,7 @@ use pbr::ProgressBar;
 use rand::Rng;
 use rusqlite::{params, Connection, Statement, NO_PARAMS};
 
-use crate::shared::{check_response, Config, EType, Error, Secrets};
+use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -62,11 +62,13 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
         hex::encode(&state.secrets.bucket),
         &chunk
     );
-    let res = state
-        .client
-        .head(&url[..])
-        .basic_auth(&state.config.user, Some(&state.config.password))
-        .send()?;
+    let res = retry(&mut || {
+        state
+            .client
+            .head(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    })?;
     match res.status() {
         reqwest::StatusCode::OK => Ok(HasChunkResult::Yes),
         reqwest::StatusCode::NOT_FOUND => Ok(HasChunkResult::No),
@@ -100,12 +102,14 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
             .process(content, &mut crypted[12..]);
         t2 = now.elapsed().as_millis();
 
-        let res = state
-            .client
-            .put(&url[..])
-            .basic_auth(&state.config.user, Some(&state.config.password))
-            .body(reqwest::Body::from(crypted))
-            .send()?;
+        let res = retry(&mut || {
+            state
+                .client
+                .put(&url[..])
+                .basic_auth(&state.config.user, Some(&state.config.password))
+                .body(reqwest::Body::from(crypted.clone()))
+                .send()
+        })?;
         match res.status() {
             reqwest::StatusCode::OK => (),
             reqwest::StatusCode::CONFLICT => {
@@ -399,13 +403,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             hex::encode(&state.secrets.bucket)
         );
 
-        state.last_delete = check_response(
+        state.last_delete = check_response(&mut || {
             state
                 .client
                 .get(&url[..])
                 .basic_auth(&state.config.user, Some(&state.config.password))
-                .send()?,
-        )?
+                .send()
+        })?
         .text()?
         .parse()?
     }
@@ -468,13 +472,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         &state.config.hostname
     );
 
-    check_response(
+    check_response(&mut || {
         state
             .client
             .put(&url[..])
             .basic_auth(&state.config.user, Some(&state.config.password))
-            .body(root)
-            .send()?,
-    )?;
+            .body(root.clone())
+            .send()
+    })?;
     Ok(())
 }
