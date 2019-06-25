@@ -113,7 +113,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         match res.status() {
             reqwest::StatusCode::OK => (),
             reqwest::StatusCode::CONFLICT => {
-                error!("Conflict in upload");
+                debug!("Conflict in upload");
             }
             code => return Err(Error::HttpStatus(code)),
         }

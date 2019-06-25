@@ -166,7 +166,13 @@ where
                     warn!("Request failed, retrying {}", res.status());
                 }
             }
-            Err(e) => warn!("Request failed, retrying {:?}", e),
+            Err(e) => {
+                if e.is_timeout() {
+                    debug!("Request failed, retrying {:?}", e)
+                } else {
+                    warn!("Request failed, retrying {:?}", e)
+                }
+            }
         };
         std::thread::sleep(std::time::Duration::from_secs(*sleep));
     }
