@@ -55,6 +55,7 @@ pub struct Config {
     pub recheck: bool,
     pub cache_db: String,
     pub hostname: String,
+    pub no_atime: bool,
 }
 
 impl Default for Config {
@@ -69,6 +70,7 @@ impl Default for Config {
             recheck: false,
             cache_db: "cache.db".to_string(),
             hostname: "".to_string(),
+            no_atime: true,
         }
     }
 }

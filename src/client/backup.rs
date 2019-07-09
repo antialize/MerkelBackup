@@ -293,6 +293,11 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
         }
         let ft = md.file_type();
         let mode = md.st_mode() & 0xFFF;
+        let atime = if state.config.no_atime {
+            0
+        } else {
+            md.st_atime()
+        };
         if ft.is_dir() {
             let (content, size) = backup_folder(&path, state)?;
             entries.push(DirEnt {
@@ -303,7 +308,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime: md.st_atime(),
+                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             });
@@ -321,7 +326,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime: md.st_atime(),
+                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             });
@@ -338,7 +343,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime: md.st_atime(),
+                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             });
