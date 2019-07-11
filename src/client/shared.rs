@@ -1,6 +1,7 @@
 extern crate serde;
 use serde::Deserialize;
 extern crate crypto;
+use lzma;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EType {
@@ -97,6 +98,7 @@ pub enum Error {
     Msg(&'static str),
     Toml(toml::de::Error),
     Nix(nix::Error),
+    LZMA(lzma::LzmaError),
 }
 
 impl From<rusqlite::Error> for Error {
@@ -144,6 +146,12 @@ impl From<toml::de::Error> for Error {
 impl From<nix::Error> for Error {
     fn from(error: nix::Error) -> Self {
         Error::Nix(error)
+    }
+}
+
+impl From<lzma::LzmaError> for Error {
+    fn from(error: lzma::LzmaError) -> Self {
+        Error::LZMA(error)
     }
 }
 

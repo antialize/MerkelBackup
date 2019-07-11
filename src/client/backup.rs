@@ -5,16 +5,29 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
+use lzma;
 use pbr::ProgressBar;
 use rand::Rng;
 use rusqlite::{params, Connection, Statement, NO_PARAMS};
 
-use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
-
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DirEnt {
+    path: String,
+    etype: EType,
+    content: String,
+    size: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    mtime: i64,
+    ctime: i64,
+}
 
 struct State<'a> {
     secrets: Secrets,
@@ -29,6 +42,7 @@ struct State<'a> {
     get_chunks_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
     rng: rand::rngs::OsRng,
+    entries: Vec<DirEnt>,
 }
 
 #[derive(PartialEq)]
@@ -214,7 +228,6 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     }
 
     //TODO check if the mtime has changed while we where pushing
-
     state.update_chunks_stmt.execute(params![
         &path.to_str().unwrap(),
         size as i64,
@@ -224,116 +237,54 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     Ok(chunks)
 }
 
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct DirEnt {
-    name: String,
-    etype: EType,
-    content: String,
-    size: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    mtime: i64,
-    atime: i64,
-    ctime: i64,
-}
-
-fn push_ents(mut entries: Vec<DirEnt>, state: &mut State) -> Result<(String, u64), Error> {
-    entries.sort();
-    let mut ans = "".to_string();
-    for ent in entries {
-        if !ans.is_empty() {
-            ans.push('\0');
-            ans.push('\0');
-        }
-        ans.push_str(&format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            ent.name,
-            ent.etype,
-            ent.size,
-            ent.content,
-            ent.mode,
-            ent.uid,
-            ent.gid,
-            ent.mtime,
-            ent.atime,
-            ent.ctime,
-        ));
-    }
-    Ok((
-        push_chunk(ans.as_bytes(), state)?,
-        ans.as_bytes().len() as u64,
-    ))
-}
-
-fn bytes_ents(entries: Vec<DirEnt>) -> u64 {
-    let mut ans = 0;
-    for ent in entries {
-        if ans != 0 {
-            ans += 1
-        }
-        ans += ent.name.len() + 25 + ent.content.len()
-    }
-    ans as u64
-}
-
-fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> {
+fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     let raw_entries = fs::read_dir(dir)?;
-    let mut entries: Vec<DirEnt> = Vec::new();
     for entry in raw_entries {
         let path = entry?.path();
         let md = fs::symlink_metadata(&path)?;
-        let filename = path
-            .file_name()
-            .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
+        let path_str = path
             .to_str()
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
-        if filename.contains('\0') {
+        if path_str.contains('\0') {
             return Err(Error::BadPath(path.to_path_buf()));
         }
         let ft = md.file_type();
         let mode = md.st_mode() & 0xFFF;
-        let atime = if state.config.no_atime {
-            0
-        } else {
-            md.st_atime()
-        };
         if ft.is_dir() {
-            let (content, size) = backup_folder(&path, state)?;
-            entries.push(DirEnt {
-                name: filename.to_string(),
+            state.entries.push(DirEnt {
+                path: path_str.to_string(),
                 etype: EType::Dir,
-                content,
-                size,
+                content: "".to_string(),
+                size: 0,
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             });
+            backup_folder(&path, state)?;
         } else if ft.is_file() {
             let mtime = md
                 .modified()?
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            entries.push(DirEnt {
-                name: filename.to_string(),
+            let ent = DirEnt {
+                path: path_str.to_string(),
                 etype: EType::File,
                 content: backup_file(&path, md.len(), mtime, state)?,
                 size: md.len(),
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
-            });
+            };
+            state.entries.push(ent);
         } else if ft.is_symlink() {
             let link = fs::read_link(&path)?;
-            entries.push(DirEnt {
-                name: filename.to_string(),
+            state.entries.push(DirEnt {
+                path: path_str.to_string(),
                 etype: EType::Link,
                 content: link
                     .to_str()
@@ -343,20 +294,13 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(String, u64), Error> 
                 mode,
                 uid: md.st_uid(),
                 gid: md.st_gid(),
-                atime,
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             });
         }
     }
 
-    if state.scan {
-        let size = bytes_ents(entries);
-        state.transfer_bytes += size;
-        Ok(("00000000000000000000000000000000".to_string(), size))
-    } else {
-        push_ents(entries, state)
-    }
+    Ok(())
 }
 
 pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
@@ -399,6 +343,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
         rng: rand::rngs::OsRng::new().map_err(|_| Error::Msg("Unable to open rng"))?,
+        entries: Vec::new(),
     };
 
     {
@@ -440,7 +385,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         });
     }
 
-    let mut entries: Vec<DirEnt> = Vec::new();
+    state.entries.clear();
     state.scan = false;
     for dir in dirs.iter() {
         let path = Path::new(dir);
@@ -451,24 +396,43 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         info!("Backing up {}", &dir);
 
         let md = fs::metadata(&path)?;
-
-        let (content, size) = backup_folder(path, &mut state)?;
-        entries.push(DirEnt {
-            name: dir.to_string(),
+        state.entries.push(DirEnt {
+            path: dir.to_string(),
             etype: EType::Dir,
-            content,
-            size,
+            content: "".to_string(),
+            size: 0,
             mode: md.st_mode() & 0xFFF,
             uid: md.st_uid(),
             gid: md.st_gid(),
-            atime: md.st_atime(),
             mtime: md.st_mtime(),
             ctime: md.st_ctime(),
         });
+        backup_folder(path, &mut state)?;
     }
 
     info!("Storing root");
-    let (root, _) = push_ents(entries, &mut state)?;
+
+    let mut ans = "".to_string();
+    for ent in state.entries.iter() {
+        if !ans.is_empty() {
+            ans.push('\0');
+            ans.push('\0');
+        }
+        ans.push_str(&format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            ent.path,
+            ent.etype,
+            ent.size,
+            ent.content,
+            ent.mode,
+            ent.uid,
+            ent.gid,
+            ent.mtime,
+            ent.ctime,
+        ));
+    }
+
+    let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
 
     let url = format!(
         "{}/roots/{}/{}",
