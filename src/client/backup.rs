@@ -43,6 +43,10 @@ struct State<'a> {
     update_chunks_stmt: Statement<'a>,
     rng: rand::rngs::OsRng,
     entries: Vec<DirEnt>,
+    modified_files_count: u64,
+    transfered_bytes: usize,
+    skipped_bytes: usize,
+    conflict_bytes: usize,
 }
 
 #[derive(PartialEq)]
@@ -125,12 +129,17 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
                 .send()
         })?;
         match res.status() {
-            reqwest::StatusCode::OK => (),
+            reqwest::StatusCode::OK => {
+                state.transfered_bytes += crypted.len();
+            }
             reqwest::StatusCode::CONFLICT => {
+                state.conflict_bytes += crypted.len();
                 debug!("Conflict in upload");
             }
             code => return Err(Error::HttpStatus(code)),
         }
+    } else {
+        state.skipped_bytes += content.len();
     }
     let t3 = now.elapsed().as_millis();
     if hc != HasChunkResult::YesCached {
@@ -194,6 +203,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     }
 
     if state.scan {
+        state.modified_files_count += 1;
         state.transfer_bytes += size;
         return Ok("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
     }
@@ -304,6 +314,8 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
 }
 
 pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let t1 = SystemTime::now();
+
     let conn = Connection::open(&config.cache_db)?;
 
     conn.pragma_update(None, "journal_mode", &"WAL".to_string())?;
@@ -344,6 +356,10 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
         rng: rand::rngs::OsRng::new().map_err(|_| Error::Msg("Unable to open rng"))?,
         entries: Vec::new(),
+        modified_files_count: 0,
+        transfered_bytes: 0,
+        conflict_bytes: 0,
+        skipped_bytes: 0,
     };
 
     {
@@ -385,6 +401,9 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         });
     }
 
+    let t2 = SystemTime::now();
+    warn!("Scan complete after {:?}, {} modified files, {} bytes to transfer\n", t2.duration_since(t1), state.modified_files_count, state.transfer_bytes);
+
     state.entries.clear();
     state.scan = false;
     for dir in dirs.iter() {
@@ -409,6 +428,9 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         });
         backup_folder(path, &mut state)?;
     }
+
+    let t3 = SystemTime::now();
+    warn!("Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n", t3.duration_since(t2), state.transfered_bytes, state.conflict_bytes, state.skipped_bytes);
 
     info!("Storing root");
 
