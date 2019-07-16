@@ -282,7 +282,14 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             let ent = DirEnt {
                 path: path_str.to_string(),
                 etype: EType::File,
-                content: backup_file(&path, md.len(), mtime, state)?,
+                content: match backup_file(&path, md.len(), mtime, state) {
+                    Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        error!("Unable to back up file {}: {:?}\n", path_str, e);
+                        continue;
+                    }
+                    Ok(v) => v,
+                },
                 size: md.len(),
                 mode,
                 uid: md.st_uid(),
@@ -402,7 +409,12 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     }
 
     let t2 = SystemTime::now();
-    warn!("Scan complete after {:?}, {} modified files, {} bytes to transfer\n", t2.duration_since(t1), state.modified_files_count, state.transfer_bytes);
+    warn!(
+        "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
+        t2.duration_since(t1),
+        state.modified_files_count,
+        state.transfer_bytes
+    );
 
     state.entries.clear();
     state.scan = false;
@@ -430,7 +442,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     }
 
     let t3 = SystemTime::now();
-    warn!("Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n", t3.duration_since(t2), state.transfered_bytes, state.conflict_bytes, state.skipped_bytes);
+    warn!(
+        "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
+        t3.duration_since(t2),
+        state.transfered_bytes,
+        state.conflict_bytes,
+        state.skipped_bytes
+    );
 
     info!("Storing root");
 
