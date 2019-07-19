@@ -361,7 +361,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
-        rng: rand::rngs::OsRng::new().map_err(|_| Error::Msg("Unable to open rng"))?,
+        rng: rand::rngs::OsRng,
         entries: Vec::new(),
         modified_files_count: 0,
         transfered_bytes: 0,

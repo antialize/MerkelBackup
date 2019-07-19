@@ -189,7 +189,7 @@ where
         };
         std::thread::sleep(std::time::Duration::from_secs(*sleep));
     }
-    return f();
+    f();
 }
 
 pub fn check_response<F>(f: &mut F) -> Result<reqwest::Response, Error>
