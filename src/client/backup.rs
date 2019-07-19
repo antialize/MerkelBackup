@@ -264,7 +264,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             state.entries.push(DirEnt {
                 path: path_str.to_string(),
                 etype: EType::Dir,
-                content: "".to_string(),
+                content: "0".to_string(),
                 size: 0,
                 mode,
                 uid: md.st_uid(),
@@ -430,7 +430,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         state.entries.push(DirEnt {
             path: dir.to_string(),
             etype: EType::Dir,
-            content: "".to_string(),
+            content: "0".to_string(),
             size: 0,
             mode: md.st_mode() & 0xFFF,
             uid: md.st_uid(),
