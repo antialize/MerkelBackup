@@ -115,7 +115,6 @@ fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
     let path = PathBuf::from_str(name).map_err(|_| Error::Msg("Bad path"))?;
     if let Mode::Restore { pattern, .. } = &mode {
         if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
-            debug!("Skip {:?}", path);
             return Ok(None);
         }
     };
