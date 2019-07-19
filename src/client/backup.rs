@@ -409,7 +409,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     }
 
     let t2 = SystemTime::now();
-    warn!(
+    info!(
         "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
         t2.duration_since(t1),
         state.modified_files_count,
@@ -442,7 +442,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     }
 
     let t3 = SystemTime::now();
-    warn!(
+    info!(
         "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
         t3.duration_since(t2),
         state.transfered_bytes,
