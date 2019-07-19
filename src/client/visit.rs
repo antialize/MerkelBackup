@@ -3,8 +3,8 @@ use chrono::NaiveDateTime;
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
+use lzma;
 use pbr::ProgressBar;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::io::Write;
@@ -58,15 +58,15 @@ fn get_chunk(
     }
 }
 
-fn get_chunk_utf8(
+fn get_root(
     client: &mut reqwest::Client,
     config: &Config,
     secrets: &Secrets,
     hash: &str,
 ) -> Result<String, Error> {
-    Ok(String::from_utf8(get_chunk(
+    Ok(String::from_utf8(lzma::decompress(&get_chunk(
         client, config, secrets, hash,
-    )?)?)
+    )?)?)?)
 }
 
 pub enum Mode {
@@ -93,16 +93,15 @@ struct Ent {
     st_mode: u32,
     uid: u32,
     gid: u32,
-    atime: i64,
     mtime: i64,
     chunks: Vec<String>,
 }
 
-fn row_ent(path: &PathBuf, row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
+fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
     if row.is_empty() {
         return Ok(None);
     }
-
+    use std::str::FromStr;
     let mut ans = row.split('\0');
     let name = ans.next().ok_or(Error::Msg("Missing name"))?;
     let etype: EType = ans.next().ok_or(Error::Msg("Missing type"))?.parse()?;
@@ -112,10 +111,8 @@ fn row_ent(path: &PathBuf, row: &str, mode: &Mode) -> Result<Option<Ent>, Error>
     let uid: u32 = ans.next().ok_or(Error::Msg("Missing uid"))?.parse()?;
     let gid: u32 = ans.next().ok_or(Error::Msg("Missing gid"))?.parse()?;
     let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
-    let atime: i64 = ans.next().ok_or(Error::Msg("Missing atime"))?.parse()?;
     let _ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
-
-    let path = path.join(name);
+    let path = PathBuf::from_str(name).map_err(|_| Error::Msg("Bad path"))?;
     if let Mode::Restore { pattern, .. } = &mode {
         if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
             debug!("Skip {:?}", path);
@@ -131,7 +128,6 @@ fn row_ent(path: &PathBuf, row: &str, mode: &Mode) -> Result<Option<Ent>, Error>
         uid,
         gid,
         mtime,
-        atime,
         chunks: reference
             .split(',')
             .map(std::string::ToString::to_string)
@@ -149,6 +145,9 @@ fn recover_entry(
     config: &Config,
     secrets: &Secrets,
 ) -> Result<(), Error> {
+    if ent.etype == EType::Root {
+        return Ok(());
+    }
     if let Some(pb) = pb {
         pb.message(&format!("{:?}: ", &ent.path));
     }
@@ -158,6 +157,7 @@ fn recover_entry(
             .map_err(|_| Error::Msg("Path not absolute"))?,
     );
     match ent.etype {
+        EType::Root => (),
         EType::Dir => {
             debug!("DIR {:?}", dpath);
             if !dry {
@@ -206,7 +206,7 @@ fn recover_entry(
         }
         nix::sys::stat::lutimes(
             &dpath,
-            &nix::sys::time::TimeValLike::seconds(ent.atime),
+            &nix::sys::time::TimeValLike::seconds(ent.mtime),
             &nix::sys::time::TimeValLike::seconds(ent.mtime),
         )?;
     }
@@ -367,7 +367,6 @@ fn full_validate(
 fn prune(
     dry: bool,
     entries: &[Ent],
-    dirs: &HashMap<String, std::path::PathBuf>,
     client: &mut reqwest::Client,
     config: &Config,
     secrets: &Secrets,
@@ -383,11 +382,8 @@ fn prune(
     .text()?;
 
     let mut used: HashSet<&str> = HashSet::new();
-    for dir in dirs.keys() {
-        used.insert(dir);
-    }
     for ent in entries.iter() {
-        if ent.etype == EType::Link {
+        if ent.etype == EType::Link || ent.etype == EType::Dir {
             continue;
         }
         for chunk in ent.chunks.iter() {
@@ -462,9 +458,6 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
     let mut client = reqwest::Client::new();
 
     let mut entries: Vec<Ent> = Vec::new();
-    let mut dirs: HashMap<String, std::path::PathBuf> = HashMap::new();
-    let mut dir_stack: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut bad_dirs: usize = 0;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
@@ -511,54 +504,45 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                 }
             }
         }
-        dir_stack.push((std::path::PathBuf::new(), root.hash.to_string()));
         info!(
             "Visiting root {} {}",
             root.host,
             NaiveDateTime::from_timestamp(root.time, 0)
         );
-        while let Some((path, hash)) = dir_stack.pop() {
-            match dirs.entry(hash.clone()) {
-                Entry::Occupied(_) => continue,
-                Entry::Vacant(e) => e.insert(path.clone()),
-            };
 
-            debug!("  Dir {:?}", path);
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                ok = false;
+                continue;
+            }
+            Ok(v) => v,
+        };
+        println!("ROOT IS");
+        println!("{}", v);
+        entries.push(Ent {
+            path: PathBuf::new(),
+            etype: EType::Root,
+            size: 0,
+            st_mode: 0,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            chunks: vec![root.hash.to_string()],
+        });
 
-            let v = match get_chunk_utf8(&mut client, &config, &secrets, &hash) {
-                Err(e) => {
-                    bad_dirs += 1;
-                    error!("Bad dir {} at path {:?}: {:?}", hash, path, e);
-                    continue;
+        for row in v.split("\0\0") {
+            match row_ent(row, &mode) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    entries.push(ent);
                 }
-                Ok(v) => v,
-            };
-
-            for row in v.split("\0\0") {
-                match row_ent(&path, row, &mode) {
-                    Ok(None) => {}
-                    Ok(Some(ent)) => {
-                        if ent.etype == EType::Dir {
-                            dir_stack
-                                .push((ent.path.clone(), ent.chunks.first().unwrap().to_string()));
-                        }
-                        entries.push(ent);
-                    }
-                    Err(e) => {
-                        bad_dirs += 1;
-                        error!(
-                            "Bad row '{}` in dir {} at path {:?}: {:?}",
-                            row, hash, path, e
-                        );
-                    }
+                Err(e) => {
+                    ok = false;
+                    error!("Bad row '{}`: {:?}", row, e);
                 }
             }
         }
-    }
-
-    if bad_dirs != 0 {
-        error!("{} of {} dirs are bad", bad_dirs, dirs.len());
-        ok = false;
     }
 
     match &mode {
@@ -567,7 +551,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                 ok = full_validate(&entries, &mut client, &config, &secrets)? && ok;
             }
         }
-        Mode::Prune { dry, .. } => prune(*dry, &entries, &dirs, &mut client, &config, &secrets)?,
+        Mode::Prune { dry, .. } => prune(*dry, &entries, &mut client, &config, &secrets)?,
         Mode::Restore {
             dry,
             dest,

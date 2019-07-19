@@ -5,6 +5,7 @@ use lzma;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EType {
+    Root,
     File,
     Dir,
     Link,
@@ -15,6 +16,7 @@ impl std::str::FromStr for EType {
 
     fn from_str(s: &str) -> Result<EType, Error> {
         match s {
+            "root" => Ok(EType::Root),
             "file" => Ok(EType::File),
             "dir" => Ok(EType::Dir),
             "link" => Ok(EType::Link),
@@ -25,6 +27,7 @@ impl std::str::FromStr for EType {
 impl std::fmt::Display for EType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            EType::Root => write!(f, "root"),
             EType::File => write!(f, "file"),
             EType::Dir => write!(f, "dir"),
             EType::Link => write!(f, "link"),
