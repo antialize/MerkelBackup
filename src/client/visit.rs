@@ -407,7 +407,7 @@ fn partial_validate(
         for chunk in &ent.chunks {
             let chunk: &str = &chunk;
             if chunk == "empty" {
-                continue
+                continue;
             }
             match existing.get(chunk) {
                 Some((size, content_size)) => {
