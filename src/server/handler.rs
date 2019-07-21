@@ -347,7 +347,10 @@ fn do_delete_chunks(
                 &chunk[2..]
             );
             tryfut_i!(
-                std::fs::remove_file(path),
+                match std::fs::remove_file(path) {
+                    Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    v => v,
+                },
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Delete failed",
             );

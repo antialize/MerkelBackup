@@ -372,9 +372,7 @@ fn prune(
 ) -> Result<(), Error> {
     let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
-    info!(
-        "Fetching chunk list",
-    );
+    info!("Fetching chunk list",);
     let content = check_response(&mut || {
         client
             .get(&url[..])
