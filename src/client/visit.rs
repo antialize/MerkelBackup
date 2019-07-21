@@ -372,6 +372,9 @@ fn prune(
 ) -> Result<(), Error> {
     let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
+    info!(
+        "Fetching chunk list",
+    );
     let content = check_response(&mut || {
         client
             .get(&url[..])
@@ -424,7 +427,7 @@ fn prune(
 
     use itertools::Itertools;
 
-    for group in &remove.iter().enumerate().chunks(128) {
+    for group in &remove.iter().enumerate().chunks(512) {
         let mut data = String::new();
 
         let mut last_idx = 0;
