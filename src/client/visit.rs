@@ -406,25 +406,28 @@ fn partial_validate(
         let mut ent_size: i64 = 0;
         for chunk in &ent.chunks {
             let chunk: &str = &chunk;
+            if chunk == "empty" {
+                continue
+            }
             match existing.get(chunk) {
                 Some((size, content_size)) => {
                     if size != content_size {
-                        warn!(
+                        error!(
                             "Chunk {} of entry {:?}, should have size {} but had size {}",
                             chunk, ent.path, size, content_size
                         );
                         ok = false;
                     }
-                    ent_size += size;
+                    ent_size += size - 12;
                 }
                 None => {
-                    warn!("Missing chunk {} of entry {:?}", chunk, ent.path);
+                    error!("Missing chunk {} of entry {:?}", chunk, ent.path);
                     ok = false;
                 }
             };
         }
         if ent.size as i64 != ent_size {
-            warn!(
+            error!(
                 "Entry {:?}, should have size {} but had size {}",
                 ent.path, ent.size, ent_size
             );
