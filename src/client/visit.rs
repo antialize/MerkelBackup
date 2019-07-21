@@ -422,27 +422,36 @@ fn prune(
         None
     };
 
-    for (idx, (chunk, size)) in remove.iter().enumerate() {
-        if let Some(pb) = &mut pb {
-            pb.message(&format!("Chunk {} / {}: ", idx + 1, remove.len()));
-        }
+    use itertools::Itertools;
 
-        let url = format!(
-            "{}/chunks/{}/{}",
-            &config.server,
-            hex::encode(&secrets.bucket),
-            chunk
-        );
+    for group in &remove.iter().enumerate().chunks(128) {
+        let mut data = String::new();
+
+        let mut last_idx = 0;
+        let mut sum_size = 0;
+        for (idx, (chunk, size)) in group {
+            last_idx = idx;
+            sum_size += size;
+            if !data.is_empty() {
+                data.push('\0');
+            }
+            data.push_str(chunk);
+        }
+        if let Some(pb) = &mut pb {
+            pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
+        }
+        let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
         check_response(&mut || {
             client
                 .delete(&url[..])
                 .basic_auth(&config.user, Some(&config.password))
+                .body(data.clone())
                 .send()
         })?;
 
         if let Some(pb) = &mut pb {
-            pb.add(*size);
+            pb.add(sum_size);
         }
     }
 
@@ -517,8 +526,7 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
             }
             Ok(v) => v,
         };
-        println!("ROOT IS");
-        println!("{}", v);
+
         entries.push(Ent {
             path: PathBuf::new(),
             etype: EType::Root,

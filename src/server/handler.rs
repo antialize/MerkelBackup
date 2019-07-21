@@ -311,6 +311,76 @@ fn handle_get_chunk(
     ))
 }
 
+fn do_delete_chunks(
+    bucket: String,
+    chunks: &[&str],
+    state: Arc<State>,
+) -> future::FutureResult<Response<Body>, Error> {
+    if chunks.is_empty() {
+        return ok_message_i(None);
+    }
+    let conn = state.conn.lock().unwrap();
+
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT hash, content IS NULL FROM chunks WHERE bucket=? AND hash IN (?{})",
+            ", ?".repeat(chunks.len() - 1)
+        ))
+        .unwrap();
+
+    let mut params: Vec<&str> = vec![&bucket];
+    for chunk in chunks {
+        params.push(chunk)
+    }
+
+    for row in stmt
+        .query_map(&params, |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+    {
+        let (chunk, external): (String, bool) = row.expect("Unable to read db row");
+        if external {
+            let path = format!(
+                "{}/data/{}/{}/{}",
+                state.config.data_dir,
+                &bucket,
+                &chunk[..2],
+                &chunk[2..]
+            );
+            tryfut_i!(
+                std::fs::remove_file(path),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Delete failed",
+            );
+        }
+    }
+
+    let count = tryfut_i!(
+        conn.execute(
+            &format!(
+                "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
+                ", ?".repeat(chunks.len() - 1)
+            ),
+            &params,
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Query failed",
+    );
+
+    tryfut_i!(
+        conn.execute(
+            "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
+            params![bucket],
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Query failed",
+    );
+
+    if count != chunks.len() {
+        return handle_error_i!(StatusCode::NOT_FOUND, "Missing chunk", "");
+    }
+    ok_message_i(None)
+}
+
 fn handle_delete_chunk(
     bucket: String,
     chunk: String,
@@ -332,55 +402,43 @@ fn handle_delete_chunk(
         StatusCode::BAD_REQUEST,
         "Bad chunk"
     );
-    let conn = state.conn.lock().unwrap();
+    let chu: &str = &chunk;
 
-    let mut stmt = conn
-        .prepare("SELECT content IS NULL FROM chunks WHERE bucket=? AND hash=?")
-        .unwrap();
+    Box::new(do_delete_chunks(bucket, std::slice::from_ref(&chu), state))
+}
 
-    let mut rows = stmt.query(params![bucket, chunk]).unwrap();
-    let external: bool = match rows.next().expect("Unable to read db row") {
-        Some(row) => row.get_unwrap(0),
-        None => return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", chunk,),
-    };
-
-    if external {
-        let path = format!(
-            "{}/data/{}/{}/{}",
-            state.config.data_dir,
-            &bucket,
-            &chunk[..2],
-            &chunk[2..]
-        );
-        tryfut!(
-            std::fs::remove_file(path),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Delete failed",
-        );
-    }
-
-    let count = tryfut!(
-        conn.execute(
-            "DELETE FROM chunks WHERE bucket=? AND hash=?",
-            params![bucket, chunk],
-        ),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Query failed",
-    );
-
-    if count == 0 {
-        return handle_error!(StatusCode::NOT_FOUND, "Not found", "");
+fn handle_delete_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+        warn!("Unauthorized access for delete chunks {}", bucket);
+        return res;
     }
 
     tryfut!(
-        conn.execute(
-            "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
-            params![bucket],
-        ),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Query failed",
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
     );
-    ok_message(None)
+
+    Box::new(
+        req.into_body()
+            .map_err(std::convert::Into::into)
+            .fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                futures::future::ok::<_, Error>(acc)
+            })
+            .and_then(move |v| {
+                let s = tryfut_i!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad chunks");
+                let chunks: Vec<&str> = s.split('\0').collect();
+                for chunk in chunks.iter() {
+                    tryfut_i!(
+                        check_hash(chunk.as_ref()),
+                        StatusCode::BAD_REQUEST,
+                        "Bad bucket"
+                    );
+                }
+                do_delete_chunks(bucket, &chunks, state)
+            }),
+    )
 }
 
 fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
@@ -554,6 +612,8 @@ pub fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false)
     } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "chunks" {
         handle_put_chunk(path[2].clone(), path[3].clone(), req, state)
+    } else if req.method() == Method::DELETE && path.len() == 3 && path[1] == "chunks" {
+        handle_delete_chunks(path[2].clone(), req, state)
     } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "chunks" {
         handle_delete_chunk(path[2].clone(), path[3].clone(), req, state)
     } else if req.method() == Method::HEAD && path.len() == 4 && path[1] == "chunks" {
