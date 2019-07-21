@@ -139,6 +139,16 @@ fn check_hash(name: &str) -> std::result::Result<(), Error> {
     Ok(())
 }
 
+fn chunk_path(data_dir: &str, bucket: &str, chunk: &str) -> String {
+    format!(
+        "{}/data/{}/{}/{}",
+        data_dir,
+        &bucket,
+        &chunk[..2],
+        &chunk[2..]
+    )
+}
+
 /// Put a chunk into the chunk archive
 fn handle_put_chunk(
     bucket: String,
@@ -214,7 +224,7 @@ fn handle_put_chunk(
                         StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
                     tryfut_i!(std::fs::create_dir_all(format!("{}/data/{}/{}", state.config.data_dir, &bucket, &chunk[..2])),
                         StatusCode::INTERNAL_SERVER_ERROR, "Could not create bucket folder");
-                    tryfut_i!(std::fs::rename(&temp_path, format!("{}/data/{}/{}/{}", state.config.data_dir, &bucket, &chunk[..2], &chunk[2..])),
+                    tryfut_i!(std::fs::rename(&temp_path, chunk_path(&state.config.data_dir, &bucket, &chunk)),
                         StatusCode::INTERNAL_SERVER_ERROR, "Move failed");
                 }
                 info!("{}:{}: put chunk {} success", file!(), line!(), chunk);
@@ -285,13 +295,7 @@ fn handle_get_chunk(
     let content = match content {
         Some(content) => content,
         None => {
-            let path = format!(
-                "{}/data/{}/{}/{}",
-                state.config.data_dir,
-                &bucket,
-                &chunk[..2],
-                &chunk[2..]
-            );
+            let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
             match std::fs::read(path) {
                 Ok(data) => data,
                 Err(e) => {
@@ -339,13 +343,7 @@ fn do_delete_chunks(
     {
         let (chunk, external): (String, bool) = row.expect("Unable to read db row");
         if external {
-            let path = format!(
-                "{}/data/{}/{}/{}",
-                state.config.data_dir,
-                &bucket,
-                &chunk[..2],
-                &chunk[2..]
-            );
+            let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
             tryfut_i!(
                 match std::fs::remove_file(path) {
                     Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -449,6 +447,8 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
         warn!("Unauthorized access for list chunks {}", bucket);
         return res;
     }
+    let full = req.uri().query().map_or(false, |q| q.contains("validate"));
+
     tryfut!(
         check_hash(bucket.as_ref()),
         StatusCode::BAD_REQUEST,
@@ -457,15 +457,38 @@ fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> 
     let mut ans = "".to_string();
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT hash, size FROM chunks WHERE bucket=?")
+        .prepare("SELECT hash, size, length(content) FROM chunks WHERE bucket=?")
         .unwrap();
 
     for row in stmt
-        .query_map(params![bucket], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(params![bucket], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .unwrap()
     {
-        let (chunk, size): (String, i64) = row.unwrap();
-        ans.push_str(&format!("{} {}\n", chunk, size));
+        let (chunk, size, content_size): (String, i64, Option<i64>) = row.unwrap();
+        if full {
+            let content_size = match content_size {
+                Some(v) => v,
+                None => {
+                    let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
+                    match std::fs::metadata(path) {
+                        Ok(md) => md.len() as i64,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
+                        Err(e) => {
+                            return handle_error!(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Unable to access metadata",
+                                e
+                            )
+                        }
+                    }
+                }
+            };
+            ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
+        } else {
+            ans.push_str(&format!("{} {}\n", chunk, size));
+        }
     }
     ok_message(Some(ans))
 }

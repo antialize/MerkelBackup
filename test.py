@@ -195,6 +195,19 @@ cache_db="%s"
                 "restore",
                 "--password",
                 "hunter2",
+                "validate"
+            ]
+        )
+
+        subprocess.check_call(
+            [
+                "target/release/mbackup",
+                "-c",
+                client_config,
+                "--user",
+                "restore",
+                "--password",
+                "hunter2",
                 "validate",
                 "--full",
             ]

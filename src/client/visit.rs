@@ -363,6 +363,76 @@ fn full_validate(
     }
 }
 
+fn partial_validate(
+    entries: &[Ent],
+    client: &mut reqwest::Client,
+    config: &Config,
+    secrets: &Secrets,
+) -> Result<bool, Error> {
+    info!("Fetching chunk list",);
+    let url = format!(
+        "{}/chunks/{}?validate=validate",
+        &config.server,
+        hex::encode(&secrets.bucket)
+    );
+    let content = check_response(&mut || {
+        client
+            .get(&url)
+            .basic_auth(&config.user, Some(&config.password))
+            .send()
+    })?
+    .text()?;
+
+    let mut existing: HashMap<&str, (i64, i64)> = HashMap::new();
+    for row in content.split('\n') {
+        if row.is_empty() {
+            continue;
+        }
+        let mut row = row.split(' ');
+        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
+        let size: i64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
+        let content_size: i64 = row
+            .next()
+            .ok_or(Error::Msg("Missing content size"))?
+            .parse()?;
+        existing.insert(chunk, (size, content_size));
+    }
+    let mut ok = true;
+    info!("Checking entries");
+    for ent in entries {
+        if ent.etype != EType::File {
+            continue;
+        }
+        let mut ent_size: i64 = 0;
+        for chunk in &ent.chunks {
+            let chunk: &str = &chunk;
+            match existing.get(chunk) {
+                Some((size, content_size)) => {
+                    if size != content_size {
+                        warn!(
+                            "Chunk {} of entry {:?}, should have size {} but had size {}",
+                            chunk, ent.path, size, content_size
+                        );
+                        ok = false;
+                    }
+                    ent_size += size;
+                }
+                None => {
+                    warn!("Missing chunk {} of entry {:?}", chunk, ent.path);
+                    ok = false;
+                }
+            };
+        }
+        if ent.size as i64 != ent_size {
+            warn!(
+                "Entry {:?}, should have size {} but had size {}",
+                ent.path, ent.size, ent_size
+            );
+        }
+    }
+    Ok(ok)
+}
+
 fn prune(
     dry: bool,
     entries: &[Ent],
@@ -370,9 +440,8 @@ fn prune(
     config: &Config,
     secrets: &Secrets,
 ) -> Result<(), Error> {
-    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-
     info!("Fetching chunk list",);
+    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
     let content = check_response(&mut || {
         client
             .get(&url[..])
@@ -425,7 +494,7 @@ fn prune(
 
     use itertools::Itertools;
 
-    for group in &remove.iter().enumerate().chunks(512) {
+    for group in &remove.iter().enumerate().chunks(20480) {
         let mut data = String::new();
 
         let mut last_idx = 0;
@@ -557,6 +626,8 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
         Mode::Validate { full } => {
             if *full {
                 ok = full_validate(&entries, &mut client, &config, &secrets)? && ok;
+            } else {
+                ok = partial_validate(&entries, &mut client, &config, &secrets)? && ok;
             }
         }
         Mode::Prune { dry, .. } => prune(*dry, &entries, &mut client, &config, &secrets)?,
