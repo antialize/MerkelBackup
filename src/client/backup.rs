@@ -248,10 +248,24 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
 }
 
 fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
-    let raw_entries = fs::read_dir(dir)?;
+    let raw_entries = match fs::read_dir(dir) {
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            error!("Unable to backup folder {:?}: {:?}\n", dir, e);
+            return Ok(());
+        }
+        Ok(v) => v,
+    };
     for entry in raw_entries {
         let path = entry?.path();
-        let md = fs::symlink_metadata(&path)?;
+        let md = match fs::symlink_metadata(&path) {
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                error!("Unable to backup entry {:?}: {:?}\n", path, e);
+                continue;
+            }
+            Ok(v) => v,
+        };
         let path_str = path
             .to_str()
             .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
@@ -285,7 +299,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
                 content: match backup_file(&path, md.len(), mtime, state) {
                     Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(e) => {
-                        error!("Unable to back up file {}: {:?}\n", path_str, e);
+                        error!("Unable to backup file {}: {:?}\n", path_str, e);
                         continue;
                     }
                     Ok(v) => v,
@@ -299,7 +313,14 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             };
             state.entries.push(ent);
         } else if ft.is_symlink() {
-            let link = fs::read_link(&path)?;
+            let link = match fs::read_link(&path) {
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    error!("Unable to backup link {:?}: {:?}\n", path, e);
+                    continue;
+                }
+                Ok(v) => v,
+            };
             state.entries.push(DirEnt {
                 path: path_str.to_string(),
                 etype: EType::Link,
