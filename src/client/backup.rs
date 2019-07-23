@@ -36,7 +36,6 @@ struct State<'a> {
     scan: bool,
     transfer_bytes: u64,
     progress: Option<ProgressBar<std::io::Stdout>>,
-    last_delete: i64,
     has_remote_stmt: Statement<'a>,
     update_remote_stmt: Statement<'a>,
     get_chunks_stmt: Statement<'a>,
@@ -59,7 +58,7 @@ enum HasChunkResult {
 fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasChunkResult, Error> {
     let cnt: i64 = state
         .has_remote_stmt
-        .query(params![chunk, state.last_delete])?
+        .query(params![chunk])?
         .next()?
         .ok_or(Error::MissingRow())?
         .get(0)?;
@@ -341,6 +340,59 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
+fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
+    let url = format!(
+        "{}/status/{}",
+        &state.config.server,
+        hex::encode(&state.secrets.bucket)
+    );
+
+    let last_delete: i64 = check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    })?
+    .text()?
+    .parse()?;
+
+    let oldest_remote: Option<i64> =
+        conn.query_row("SELECT min(time) FROM remote", NO_PARAMS, |row| row.get(0))?;
+
+    let should_update_remote = match oldest_remote {
+        Some(t) => t < last_delete,
+        None => true,
+    };
+
+    if !should_update_remote {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM remote", NO_PARAMS)?;
+    let url = format!(
+        "{}/chunks/{}",
+        &state.config.server,
+        hex::encode(&state.secrets.bucket)
+    );
+    let content = check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    })?
+    .text()?;
+    let mut cnt=0;
+    for row in content.split('\n') {
+        let mut row = row.split(' ');
+        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
+        state.update_remote_stmt.execute(params![chunk])?;
+        cnt += 1;
+    }
+    info!("Prune detected. {} objects reloaded from remote state", cnt);
+    Ok(())
+}
+
 pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     let t1 = SystemTime::now();
 
@@ -373,9 +425,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         scan: true,
         transfer_bytes: 0,
         progress: None,
-        last_delete: 0,
-        has_remote_stmt: conn
-            .prepare("SELECT count(*) FROM remote WHERE chunk = ? AND time > ?")?,
+        has_remote_stmt: conn.prepare("SELECT count(*) FROM remote WHERE chunk = ?")?,
         update_remote_stmt: conn
             .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")?,
         get_chunks_stmt: conn
@@ -390,23 +440,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         skipped_bytes: 0,
     };
 
-    {
-        let url = format!(
-            "{}/status/{}",
-            &state.config.server,
-            hex::encode(&state.secrets.bucket)
-        );
-
-        state.last_delete = check_response(&mut || {
-            state
-                .client
-                .get(&url[..])
-                .basic_auth(&state.config.user, Some(&state.config.password))
-                .send()
-        })?
-        .text()?
-        .parse()?
-    }
+    update_remote(&conn, &mut state)?;
 
     let dirs = state.config.backup_dirs.clone();
     for dir in dirs.iter() {

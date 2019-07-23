@@ -431,11 +431,7 @@ fn handle_delete_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -
                 let s = tryfut_i!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad chunks");
                 let chunks: Vec<&str> = s.split('\0').collect();
                 for chunk in chunks.iter() {
-                    tryfut_i!(
-                        check_hash(chunk.as_ref()),
-                        StatusCode::BAD_REQUEST,
-                        "Bad bucket"
-                    );
+                    tryfut_i!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad bucket");
                 }
                 do_delete_chunks(bucket, &chunks, state)
             }),
@@ -443,11 +439,20 @@ fn handle_delete_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -
 }
 
 fn handle_list_chunks(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Get) {
+    let full = req.uri().query().map_or(false, |q| q.contains("validate"));
+
+    if let Some(res) = check_auth(
+        &req,
+        state.clone(),
+        if full {
+            AccessType::Get
+        } else {
+            AccessType::Put
+        },
+    ) {
         warn!("Unauthorized access for list chunks {}", bucket);
         return res;
     }
-    let full = req.uri().query().map_or(false, |q| q.contains("validate"));
 
     tryfut!(
         check_hash(bucket.as_ref()),
