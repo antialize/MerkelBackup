@@ -382,7 +382,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
             .send()
     })?
     .text()?;
-    let mut cnt=0;
+    let mut cnt = 0;
     for row in content.split('\n') {
         let mut row = row.split(' ');
         let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
