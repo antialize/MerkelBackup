@@ -1,8 +1,8 @@
 //! This is the implementation for the mbackup server.
 //! It presents a REST api served over a hyper https server.
+#![feature(async_await, await_macro)]
 
 extern crate clap;
-extern crate futures;
 extern crate hyper;
 extern crate native_tls;
 extern crate rand;
@@ -16,9 +16,8 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 
-use futures::Future;
-use futures::Stream;
 use hyper::server::conn::Http;
+use hyper::service::make_service_fn;
 use hyper::service::service_fn;
 use hyper::Server;
 use native_tls::{Identity, TlsAcceptor};
@@ -28,12 +27,14 @@ use tokio::net::TcpListener;
 mod config;
 mod error;
 use config::parse_config;
+use error::Error;
 mod handler;
 use handler::backup_serve;
 mod state;
 use state::{setup_db, State};
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
 
     let config = parse_config();
@@ -46,17 +47,17 @@ fn main() {
     let bind = state.config.bind.clone();
 
     if state.config.ssl_cert == "" {
-        let server = Server::bind(&addr)
-            .serve(move || {
-                let state = state.clone();
-                service_fn(move |req| backup_serve(req, state.clone()))
-            })
-            .map_err(|e| eprintln!("server error: {}", e));
+        let service = make_service_fn(move |_| {
+            let state = state.clone();
+            async { Ok::<_, Error>(service_fn(move |req| backup_serve(req, state.clone()))) }
+        });
+
+        let server = Server::bind(&addr).serve(service);
         info!("Server listening on {}", &bind);
         info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
-        hyper::rt::run(server);
+        server.await?;
     } else {
-        let srv = TcpListener::bind(&addr).expect("Error binding local port");
+        /*let srv = TcpListener::bind(&addr).expect("Error binding local port");
 
         let cert = std::fs::read(&state.config.ssl_cert).expect("Unable to read ssl cert");
         let cert =
@@ -98,6 +99,7 @@ fn main() {
             });
         info!("Server listening on {}", &bind);
         info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
-        hyper::rt::run(server);
+        server.await?;*/
     }
+    Ok(())
 }
