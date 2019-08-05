@@ -12,6 +12,49 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
+struct Size {
+    bytes: u64,
+}
+
+impl std::fmt::Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = self.bytes;
+        if bytes < 1024 {
+            write!(f, "{} B", bytes)
+        } else if bytes < 1024 * 64 {
+            write!(f, "{:.1} KiB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 {
+            write!(f, "{:.0} KiB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 * 64 {
+            write!(f, "{:.1} MiB", bytes as f64 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            write!(f, "{:.0} MiB", bytes as f64 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 64 {
+            write!(f, "{:.1} GiB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 1024 {
+            write!(f, "{:.0} GiB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 1024 * 64 {
+            write!(
+                f,
+                "{:.1} TiB",
+                bytes as f64 / 1024.0 / 1024.0 / 1024.0 / 1024.0
+            )
+        } else {
+            write!(
+                f,
+                "{:.0} TiB",
+                bytes as f64 / 1024.0 / 1024.0 / 1024.0 / 1024.0
+            )
+        }
+    }
+}
+
+impl From<u64> for Size {
+    fn from(v: u64) -> Size {
+        Size { bytes: v }
+    }
+}
+
 fn get_chunk(
     client: &mut reqwest::Client,
     config: &Config,
@@ -532,6 +575,63 @@ fn prune(
         pb.finish();
     }
 
+    Ok(())
+}
+
+pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let mut client = reqwest::Client::new();
+    let root_visit = roots(&config, &secrets, &client, None)?;
+    let mut root_vec = Vec::new();
+    for root in root_visit.iter() {
+        root_vec.push(root?);
+    }
+    let mut total_size: u64 = 0;
+    let mut seen = HashSet::new();
+    info!(
+        "{:<20} {:<20} {:>10} {:>10} {:>10}",
+        "Host", "Time", "Usage", "Size", "Sum"
+    );
+
+    for root in root_vec.iter().rev() {
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                continue;
+            }
+            Ok(v) => v,
+        };
+        let mut size: u64 = v.len() as u64;
+        let old_total_size = total_size;
+        total_size += v.len() as u64;
+
+        for row in v.split("\0\0") {
+            match row_ent(row, &Mode::Validate { full: false }) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    size += ent.size;
+                    let mut remaining = ent.size;
+                    for chunk in ent.chunks {
+                        let chunk_size = u64::min(remaining, 64 * 1024 * 1024);
+                        if seen.insert(chunk) {
+                            total_size += chunk_size;
+                        }
+                        remaining -= chunk_size;
+                    }
+                }
+                Err(e) => {
+                    error!("Bad row '{}`: {:?}", row, e);
+                }
+            }
+        }
+        let time_str = std::format!("{}", NaiveDateTime::from_timestamp(root.time, 0));
+        let usage_str = std::format!("{}", Size::from(total_size - old_total_size));
+        let size_str = std::format!("{}", Size::from(size));
+        let sum_str = std::format!("{}", Size::from(total_size));
+        info!(
+            "{:<20} {:<20} {:>10} {:>10} {:>10}",
+            root.host, time_str, usage_str, size_str, sum_str
+        );
+    }
     Ok(())
 }
 
