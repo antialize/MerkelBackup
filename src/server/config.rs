@@ -58,8 +58,6 @@ pub struct Config {
     pub verbosity: log::LevelFilter,
     pub bind: String,
     pub data_dir: String,
-    pub ssl_cert: String,
-    pub ssl_key: String,
     pub users: Vec<User>,
 }
 
@@ -71,8 +69,6 @@ impl Default for Config {
             bind: "0.0.0.0:3321".to_string(),
             data_dir: ".".to_string(),
             users: Vec::new(),
-            ssl_key: "".to_string(),
-            ssl_cert: "".to_string(),
         }
     }
 }
@@ -109,18 +105,6 @@ pub fn parse_config() -> Config {
                 .short("c")
                 .takes_value(true)
                 .help("Path to config file"),
-        )
-        .arg(
-            Arg::with_name("ssl_key")
-                .long("ssl-key")
-                .takes_value(true)
-                .help("Key for ssl cert"),
-        )
-        .arg(
-            Arg::with_name("ssl_cert")
-                .long("ssl-cert")
-                .takes_value(true)
-                .help("Path to pkcs12 cert to use"),
         )
         .get_matches();
 
@@ -160,12 +144,6 @@ pub fn parse_config() -> Config {
     }
     if let Some(dir) = matches.value_of("data_dir") {
         config.data_dir = dir.to_string();
-    }
-    if let Some(key) = matches.value_of("ssl_key") {
-        config.ssl_key = key.to_string();
-    }
-    if let Some(cert) = matches.value_of("ssl_cert") {
-        config.ssl_cert = cert.to_string();
     }
 
     config

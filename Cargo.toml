@@ -31,7 +31,5 @@ nix = ""
 libc = ""
 rust-lzma = ""
 itertools = ""
-native-tls = ""
-tokio-tls = ""
 hyper = { git = "https://github.com/hyperium/hyper" }
 tokio = { git = "https://github.com/tokio-rs/tokio" }
