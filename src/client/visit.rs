@@ -635,6 +635,40 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
+    let mut client = reqwest::Client::new();
+    info!("{:4} {:<70} {:>10}", "Type", "Path", "Size",);
+    for root in roots(&config, &secrets, &client, Some(root))?.iter() {
+        let root = root?;
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                continue;
+            }
+            Ok(v) => v,
+        };
+        for row in v.split("\0\0") {
+            match row_ent(row, &Mode::Validate { full: false }) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    let etype = format!("{}", ent.etype);
+                    let size = Size::from(ent.size);
+                    info!(
+                        "{:4} {:<70} {:>10}",
+                        etype,
+                        ent.path.to_str().unwrap(),
+                        size
+                    );
+                }
+                Err(e) => {
+                    error!("Bad row '{}`: {:?}", row, e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> {
     let mut client = reqwest::Client::new();
 
