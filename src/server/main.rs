@@ -1,6 +1,6 @@
 //! This is the implementation for the mbackup server.
 //! It presents a REST api served over a hyper https server.
-#![feature(async_await, await_macro)]
+#![feature(async_await)]
 
 extern crate clap;
 extern crate hyper;
