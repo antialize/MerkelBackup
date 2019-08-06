@@ -177,6 +177,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
             ),
         )
         .subcommand(SubCommand::with_name("du").about("list disk usage"))
+        .subcommand(SubCommand::with_name("ping").about("measure ping time"))
         .subcommand(
             SubCommand::with_name("ls").about("list files in root").arg(
                 Arg::with_name("root")
@@ -313,6 +314,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         || matches.subcommand_matches("restore").is_some()
         || matches.subcommand_matches("delete-root").is_some()
         || matches.subcommand_matches("du").is_some()
+        || matches.subcommand_matches("ping").is_some()
         || matches.subcommand_matches("ls").is_some()
     {
     } else {
@@ -383,6 +385,17 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
     Ok(())
 }
 
+fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let client = reqwest::Client::new();
+    loop {
+        let start = std::time::Instant::now();
+        visit::roots(&config, &secrets, &client, None)?;
+        let duration = start.elapsed();
+        println!("Ping {:?}", duration);
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Error> {
     simple_logger::init_with_level(log::Level::Trace)
         .map_err(|_| Error::Msg("Unable to init log"))?;
@@ -441,6 +454,9 @@ fn main() -> Result<(), Error> {
             true
         } else if let Some(_) = matches.subcommand_matches("du") {
             visit::disk_usage(config, secrets)?;
+            true
+        } else if let Some(_) = matches.subcommand_matches("ping") {
+            ping(config, secrets)?;
             true
         } else if let Some(m) = matches.subcommand_matches("ls") {
             visit::list_root(m.value_of("root").unwrap(), config, secrets)?;
