@@ -178,6 +178,14 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         )
         .subcommand(SubCommand::with_name("du").about("list disk usage"))
         .subcommand(
+            SubCommand::with_name("ls").about("list files in root").arg(
+                Arg::with_name("root")
+                    .index(1)
+                    .required(true)
+                    .help("the root to restore"),
+            ),
+        )
+        .subcommand(
             SubCommand::with_name("delete-root")
                 .about("delete a root")
                 .arg(
@@ -305,6 +313,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
         || matches.subcommand_matches("restore").is_some()
         || matches.subcommand_matches("delete-root").is_some()
         || matches.subcommand_matches("du").is_some()
+        || matches.subcommand_matches("ls").is_some()
     {
     } else {
         return Err(Error::Msg("No sub command specified"));
@@ -432,6 +441,9 @@ fn main() -> Result<(), Error> {
             true
         } else if let Some(_) = matches.subcommand_matches("du") {
             visit::disk_usage(config, secrets)?;
+            true
+        } else if let Some(m) = matches.subcommand_matches("ls") {
+            visit::list_root(m.value_of("root").unwrap(), config, secrets)?;
             true
         } else {
             panic!("unknown subcommand");
