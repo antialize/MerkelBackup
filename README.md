@@ -67,7 +67,7 @@ First create a config file in /etc/mbackup.toml with content like below:
 user = "backup"
 password = "hunter2"
 encryption_key = "MySecretEncryptionKey"
-server = "backup.example.com"
+server = "https://backup.example.com"
 backup_dirs = [
     "/home/importantuser",
     "/var/importantdata",
