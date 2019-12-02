@@ -127,6 +127,10 @@ pub enum Mode {
         dry: bool,
         preserve_owner: bool,
     },
+    Cat {
+        root: String,
+        path: PathBuf,
+    },
 }
 
 struct Ent {
@@ -156,9 +160,17 @@ fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
     let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
     let _ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
     let path = PathBuf::from_str(name).map_err(|_| Error::Msg("Bad path"))?;
-    if let Mode::Restore { pattern, .. } = &mode {
-        if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
-            return Ok(None);
+    match &mode {
+        Mode::Validate { .. } | Mode::Prune { .. } => {}
+        Mode::Restore { pattern, .. } => {
+            if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
+                return Ok(None);
+            }
+        }
+        Mode::Cat { path: cat_path, .. } => {
+            if &path != cat_path {
+                return Ok(None);
+            }
         }
     };
 
@@ -680,12 +692,9 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
 
     let mut root_found = false;
 
-    let root: Option<&str> = {
-        if let Mode::Restore { root, .. } = &mode {
-            Some(root)
-        } else {
-            None
-        }
+    let root: Option<&str> = match &mode {
+        Mode::Validate { .. } | Mode::Prune { .. } => None,
+        Mode::Restore { root, .. } | Mode::Cat { root, .. } => Some(root),
     };
 
     let mut ok = true;
@@ -693,8 +702,13 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
     for root in roots(&config, &secrets, &client, root)?.iter() {
         let root = root?;
         root_found = true;
-        if let Mode::Prune { dry, age } = &mode {
-            if let Some(age) = age {
+        match &mode {
+            Mode::Validate { .. } | Mode::Restore { .. } | Mode::Cat { .. } => {}
+            Mode::Prune { dry, age: None } => {}
+            Mode::Prune {
+                dry,
+                age: Some(age),
+            } => {
                 if root.time + 60 * 60 * 24 * i64::from(*age) < now {
                     info!(
                         "Removing root {} {}",
@@ -800,6 +814,30 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                     error!("Unable to recover entry {:?}: {:?}", ent.path, e);
                     return Err(e);
                 }
+            }
+        }
+        Mode::Cat { .. } => {
+            if !root_found {
+                return Err(Error::Msg("Root not found"));
+            }
+            let mut it = entries.iter();
+            let _root = it.next().unwrap();
+            let ent = match it.next() {
+                None => return Err(Error::Msg("Path not found")),
+                Some(ent) => ent,
+            };
+            match ent.etype {
+                EType::File => {}
+                EType::Root | EType::Dir | EType::Link => {
+                    panic!("Expected file but got {}", ent.etype);
+                    //return Err(Error::Msg("Expected file but got some other type"));
+                }
+            };
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            for chunk in ent.chunks.iter() {
+                let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
+                handle.write_all(&res)?;
             }
         }
     }

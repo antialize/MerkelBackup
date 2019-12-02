@@ -232,6 +232,22 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                         .help("Don't actually restore anything"),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("cat")
+                .about("Dump file to stdout")
+                .arg(
+                    Arg::with_name("root")
+                        .index(1)
+                        .required(true)
+                        .help("the root to restore"),
+                )
+                .arg(
+                    Arg::with_name("path")
+                        .index(2)
+                        .required(true)
+                        .help("path of file to restore"),
+                ),
+        )
         .get_matches();
 
     let mut config: Config = match matches.value_of("config") {
@@ -312,6 +328,7 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
     } else if matches.subcommand_matches("roots").is_some()
         || matches.subcommand_matches("validate").is_some()
         || matches.subcommand_matches("restore").is_some()
+        || matches.subcommand_matches("cat").is_some()
         || matches.subcommand_matches("delete-root").is_some()
         || matches.subcommand_matches("du").is_some()
         || matches.subcommand_matches("ping").is_some()
@@ -448,6 +465,20 @@ fn main() -> Result<(), Error> {
                     ),
                     dry: m.is_present("dry"),
                     preserve_owner: m.is_present("preserve_owner"),
+                },
+            )?
+        } else if let Some(m) = matches.subcommand_matches("cat") {
+            visit::run(
+                config,
+                secrets,
+                visit::Mode::Cat {
+                    root: m
+                        .value_of("root")
+                        .ok_or(Error::Msg("Missing root"))?
+                        .to_string(),
+                    path: std::path::PathBuf::from(
+                        m.value_of("path").ok_or(Error::Msg("Missing path"))?,
+                    ),
                 },
             )?
         } else if let Some(m) = matches.subcommand_matches("delete-root") {
