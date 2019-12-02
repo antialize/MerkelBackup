@@ -9,7 +9,7 @@ extern crate rand;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
-extern crate simple_logger;
+extern crate simplelog;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
@@ -397,8 +397,12 @@ fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
-    simple_logger::init_with_level(log::Level::Trace)
-        .map_err(|_| Error::Msg("Unable to init log"))?;
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Trace,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Stderr,
+    )
+    .map_err(|_| Error::Msg("Unable to init log"))?;
 
     let (config, matches) = parse_config()?;
     log::set_max_level(config.verbosity);
