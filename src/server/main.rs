@@ -7,7 +7,7 @@ extern crate hyper;
 extern crate rand;
 extern crate rusqlite;
 extern crate serde;
-extern crate simple_logger;
+extern crate simplelog;
 extern crate tokio;
 extern crate toml;
 #[macro_use]
@@ -32,7 +32,12 @@ use state::{setup_db, State};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    simple_logger::init_with_level(log::Level::Trace).expect("Unable to init log");
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Trace,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Stderr,
+    )
+    .expect("Unable to init log");
 
     let config = parse_config();
     log::set_max_level(config.verbosity);

@@ -15,7 +15,7 @@ path = "src/client/main.rs"
 
 [dependencies]
 log = ""
-simple_logger = ""
+simplelog = ""
 rusqlite = ""
 rust-crypto = ""
 rand = ""
