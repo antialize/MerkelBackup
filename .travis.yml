@@ -1,8 +1,13 @@
 language: rust
 rust:
-  - nightly-2019-07-26
+  - stable
+  - beta
+  - nightly
 
-matrix:
+jobs:
+  allow_failures:
+    - rust: nightly
+
   fast_finish: true
 
 cache: cargo
