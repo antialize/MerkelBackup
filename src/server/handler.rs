@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::config::{AccessType, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture};
 use crate::state::State;
+use hyper::body::HttpBody;
 
 /// Print an error to the terminal and return a future describing the error
 fn handle_error<E: std::fmt::Debug>(
@@ -158,7 +159,7 @@ async fn handle_put_chunk(
 
     let mut v = Vec::new();
     let mut body = req.into_body();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = body.data().await {
         v.extend_from_slice(&chunk?);
         if v.len() > 1024 * 1024 * 1024 {
             return handle_error!(StatusCode::BAD_REQUEST, "Content too large", "");
@@ -420,7 +421,7 @@ async fn handle_delete_chunks(
     let mut v = Vec::new();
     let mut body = req.into_body();
 
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = body.data().await {
         let chunk = chunk?;
         v.extend_from_slice(&chunk);
         if v.len() >= 1024 * 1024 * 256 {
@@ -595,7 +596,7 @@ async fn handle_put_root(
 
     let mut body = req.into_body();
     let mut v = Vec::new();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = body.data().await {
         let chunk = chunk?;
         v.extend_from_slice(&chunk);
         if v.len() > 1024 * 1024 * 10 {

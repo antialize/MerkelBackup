@@ -1,6 +1,5 @@
 //! This is the implementation for the mbackup server.
 //! It presents a REST api served over a hyper https server.
-#![feature(async_await)]
 
 extern crate clap;
 extern crate hyper;
@@ -14,12 +13,10 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 
-use hyper::server::conn::Http;
 use hyper::service::make_service_fn;
 use hyper::service::service_fn;
 use hyper::Server;
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
 
 mod config;
 mod error;

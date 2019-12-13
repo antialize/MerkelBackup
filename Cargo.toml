@@ -31,5 +31,5 @@ nix = ""
 libc = ""
 rust-lzma = ""
 itertools = ""
-hyper = { git = "https://github.com/hyperium/hyper" }
-tokio = { git = "https://github.com/tokio-rs/tokio" }
+hyper = "0.13.0"
+tokio = {version="0.2", features = ["rt-threaded", "macros"]}
