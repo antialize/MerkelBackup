@@ -12,6 +12,49 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
+struct Size {
+    bytes: u64,
+}
+
+impl std::fmt::Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = self.bytes;
+        if bytes < 1024 {
+            write!(f, "{} B", bytes)
+        } else if bytes < 1024 * 64 {
+            write!(f, "{:.1} KiB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 {
+            write!(f, "{:.0} KiB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 * 64 {
+            write!(f, "{:.1} MiB", bytes as f64 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            write!(f, "{:.0} MiB", bytes as f64 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 64 {
+            write!(f, "{:.1} GiB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 1024 {
+            write!(f, "{:.0} GiB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 * 1024 * 64 {
+            write!(
+                f,
+                "{:.1} TiB",
+                bytes as f64 / 1024.0 / 1024.0 / 1024.0 / 1024.0
+            )
+        } else {
+            write!(
+                f,
+                "{:.0} TiB",
+                bytes as f64 / 1024.0 / 1024.0 / 1024.0 / 1024.0
+            )
+        }
+    }
+}
+
+impl From<u64> for Size {
+    fn from(v: u64) -> Size {
+        Size { bytes: v }
+    }
+}
+
 fn get_chunk(
     client: &mut reqwest::Client,
     config: &Config,
@@ -84,6 +127,10 @@ pub enum Mode {
         dry: bool,
         preserve_owner: bool,
     },
+    Cat {
+        root: String,
+        path: PathBuf,
+    },
 }
 
 struct Ent {
@@ -113,9 +160,17 @@ fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
     let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
     let _ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
     let path = PathBuf::from_str(name).map_err(|_| Error::Msg("Bad path"))?;
-    if let Mode::Restore { pattern, .. } = &mode {
-        if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
-            return Ok(None);
+    match &mode {
+        Mode::Validate { .. } | Mode::Prune { .. } => {}
+        Mode::Restore { pattern, .. } => {
+            if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
+                return Ok(None);
+            }
+        }
+        Mode::Cat { path: cat_path, .. } => {
+            if &path != cat_path {
+                return Ok(None);
+            }
         }
     };
 
@@ -535,6 +590,97 @@ fn prune(
     Ok(())
 }
 
+pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let mut client = reqwest::Client::new();
+    let root_visit = roots(&config, &secrets, &client, None)?;
+    let mut root_vec = Vec::new();
+    for root in root_visit.iter() {
+        root_vec.push(root?);
+    }
+    let mut total_size: u64 = 0;
+    let mut seen = HashSet::new();
+    info!(
+        "{:<20} {:<20} {:>10} {:>10} {:>10}",
+        "Host", "Time", "Usage", "Size", "Sum"
+    );
+
+    for root in root_vec.iter().rev() {
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                continue;
+            }
+            Ok(v) => v,
+        };
+        let mut size: u64 = v.len() as u64;
+        let old_total_size = total_size;
+        total_size += v.len() as u64;
+
+        for row in v.split("\0\0") {
+            match row_ent(row, &Mode::Validate { full: false }) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    size += ent.size;
+                    let mut remaining = ent.size;
+                    for chunk in ent.chunks {
+                        let chunk_size = u64::min(remaining, 64 * 1024 * 1024);
+                        if seen.insert(chunk) {
+                            total_size += chunk_size;
+                        }
+                        remaining -= chunk_size;
+                    }
+                }
+                Err(e) => {
+                    error!("Bad row '{}`: {:?}", row, e);
+                }
+            }
+        }
+        let time_str = std::format!("{}", NaiveDateTime::from_timestamp(root.time, 0));
+        let usage_str = std::format!("{}", Size::from(total_size - old_total_size));
+        let size_str = std::format!("{}", Size::from(size));
+        let sum_str = std::format!("{}", Size::from(total_size));
+        info!(
+            "{:<20} {:<20} {:>10} {:>10} {:>10}",
+            root.host, time_str, usage_str, size_str, sum_str
+        );
+    }
+    Ok(())
+}
+
+pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
+    let mut client = reqwest::Client::new();
+    info!("{:4} {:<70} {:>10}", "Type", "Path", "Size",);
+    for root in roots(&config, &secrets, &client, Some(root))?.iter() {
+        let root = root?;
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                continue;
+            }
+            Ok(v) => v,
+        };
+        for row in v.split("\0\0") {
+            match row_ent(row, &Mode::Validate { full: false }) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    let etype = format!("{}", ent.etype);
+                    let size = Size::from(ent.size);
+                    info!(
+                        "{:4} {:<70} {:>10}",
+                        etype,
+                        ent.path.to_str().unwrap(),
+                        size
+                    );
+                }
+                Err(e) => {
+                    error!("Bad row '{}`: {:?}", row, e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> {
     let mut client = reqwest::Client::new();
 
@@ -546,12 +692,9 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
 
     let mut root_found = false;
 
-    let root: Option<&str> = {
-        if let Mode::Restore { root, .. } = &mode {
-            Some(root)
-        } else {
-            None
-        }
+    let root: Option<&str> = match &mode {
+        Mode::Validate { .. } | Mode::Prune { .. } => None,
+        Mode::Restore { root, .. } | Mode::Cat { root, .. } => Some(root),
     };
 
     let mut ok = true;
@@ -559,8 +702,13 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
     for root in roots(&config, &secrets, &client, root)?.iter() {
         let root = root?;
         root_found = true;
-        if let Mode::Prune { dry, age } = &mode {
-            if let Some(age) = age {
+        match &mode {
+            Mode::Validate { .. } | Mode::Restore { .. } | Mode::Cat { .. } => {}
+            Mode::Prune { dry, age: None } => {}
+            Mode::Prune {
+                dry,
+                age: Some(age),
+            } => {
                 if root.time + 60 * 60 * 24 * i64::from(*age) < now {
                     info!(
                         "Removing root {} {}",
@@ -666,6 +814,30 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                     error!("Unable to recover entry {:?}: {:?}", ent.path, e);
                     return Err(e);
                 }
+            }
+        }
+        Mode::Cat { .. } => {
+            if !root_found {
+                return Err(Error::Msg("Root not found"));
+            }
+            let mut it = entries.iter();
+            let _root = it.next().unwrap();
+            let ent = match it.next() {
+                None => return Err(Error::Msg("Path not found")),
+                Some(ent) => ent,
+            };
+            match ent.etype {
+                EType::File => {}
+                EType::Root | EType::Dir | EType::Link => {
+                    panic!("Expected file but got {}", ent.etype);
+                    //return Err(Error::Msg("Expected file but got some other type"));
+                }
+            };
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            for chunk in ent.chunks.iter() {
+                let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
+                handle.write_all(&res)?;
             }
         }
     }

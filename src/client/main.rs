@@ -9,7 +9,7 @@ extern crate rand;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
-extern crate simple_logger;
+extern crate simplelog;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
@@ -176,6 +176,16 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                     .help("Hostname to restore from"),
             ),
         )
+        .subcommand(SubCommand::with_name("du").about("list disk usage"))
+        .subcommand(SubCommand::with_name("ping").about("measure ping time"))
+        .subcommand(
+            SubCommand::with_name("ls").about("list files in root").arg(
+                Arg::with_name("root")
+                    .index(1)
+                    .required(true)
+                    .help("the root to restore"),
+            ),
+        )
         .subcommand(
             SubCommand::with_name("delete-root")
                 .about("delete a root")
@@ -220,6 +230,22 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
                     Arg::with_name("dry")
                         .long("dry")
                         .help("Don't actually restore anything"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("cat")
+                .about("Dump file to stdout")
+                .arg(
+                    Arg::with_name("root")
+                        .index(1)
+                        .required(true)
+                        .help("the root to restore"),
+                )
+                .arg(
+                    Arg::with_name("path")
+                        .index(2)
+                        .required(true)
+                        .help("path of file to restore"),
                 ),
         )
         .get_matches();
@@ -302,7 +328,11 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
     } else if matches.subcommand_matches("roots").is_some()
         || matches.subcommand_matches("validate").is_some()
         || matches.subcommand_matches("restore").is_some()
+        || matches.subcommand_matches("cat").is_some()
         || matches.subcommand_matches("delete-root").is_some()
+        || matches.subcommand_matches("du").is_some()
+        || matches.subcommand_matches("ping").is_some()
+        || matches.subcommand_matches("ls").is_some()
     {
     } else {
         return Err(Error::Msg("No sub command specified"));
@@ -372,9 +402,24 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
     Ok(())
 }
 
+fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
+    let client = reqwest::Client::new();
+    loop {
+        let start = std::time::Instant::now();
+        visit::roots(&config, &secrets, &client, None)?;
+        let duration = start.elapsed();
+        println!("Ping {:?}", duration);
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Error> {
-    simple_logger::init_with_level(log::Level::Trace)
-        .map_err(|_| Error::Msg("Unable to init log"))?;
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Trace,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Stderr,
+    )
+    .map_err(|_| Error::Msg("Unable to init log"))?;
 
     let (config, matches) = parse_config()?;
     log::set_max_level(config.verbosity);
@@ -422,11 +467,34 @@ fn main() -> Result<(), Error> {
                     preserve_owner: m.is_present("preserve_owner"),
                 },
             )?
+        } else if let Some(m) = matches.subcommand_matches("cat") {
+            visit::run(
+                config,
+                secrets,
+                visit::Mode::Cat {
+                    root: m
+                        .value_of("root")
+                        .ok_or(Error::Msg("Missing root"))?
+                        .to_string(),
+                    path: std::path::PathBuf::from(
+                        m.value_of("path").ok_or(Error::Msg("Missing path"))?,
+                    ),
+                },
+            )?
         } else if let Some(m) = matches.subcommand_matches("delete-root") {
             delete_root(m.value_of("root").unwrap(), config, secrets)?;
             true
         } else if let Some(m) = matches.subcommand_matches("roots") {
             list_roots(m.value_of("hostname"), config, secrets)?;
+            true
+        } else if let Some(_) = matches.subcommand_matches("du") {
+            visit::disk_usage(config, secrets)?;
+            true
+        } else if let Some(_) = matches.subcommand_matches("ping") {
+            ping(config, secrets)?;
+            true
+        } else if let Some(m) = matches.subcommand_matches("ls") {
+            visit::list_root(m.value_of("root").unwrap(), config, secrets)?;
             true
         } else {
             panic!("unknown subcommand");

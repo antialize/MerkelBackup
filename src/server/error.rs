@@ -1,4 +1,3 @@
-use futures::Future;
 use hyper::{Body, Response};
 
 #[derive(Debug)]
@@ -25,4 +24,4 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The main result type used throughout
-pub type ResponseFuture = Box<Future<Item = Response<Body>, Error = Error> + Send>;
+pub type ResponseFuture = Result<Response<Body>, Error>;
