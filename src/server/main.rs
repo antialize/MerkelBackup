@@ -6,12 +6,12 @@ extern crate hyper;
 extern crate rand;
 extern crate rusqlite;
 extern crate serde;
-extern crate simplelog;
 extern crate tokio;
 extern crate toml;
 #[macro_use]
 extern crate log;
 extern crate base64;
+extern crate chrono;
 
 use hyper::service::make_service_fn;
 use hyper::service::service_fn;
@@ -27,14 +27,35 @@ use handler::backup_serve;
 mod state;
 use state::{setup_db, State};
 
+struct Logger {}
+impl log::Log for Logger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let level_string = record.level().to_string();
+        let target = if record.target().len() > 0 {
+            record.target()
+        } else {
+            record.module_path().unwrap_or_default()
+        };
+        eprintln!(
+            "{} {:<5} [{}] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
+            level_string,
+            target,
+            record.args());
+    }
+
+    fn flush(&self) {
+    }
+}
+static LOGGER: Logger = Logger{};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    simplelog::TermLogger::init(
-        simplelog::LevelFilter::Trace,
-        simplelog::Config::default(),
-        simplelog::TerminalMode::Stderr,
-    )
-    .expect("Unable to init log");
+    log::set_logger(&LOGGER).unwrap();
 
     let config = parse_config();
     log::set_max_level(config.verbosity);

@@ -9,7 +9,8 @@ extern crate rand;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
-extern crate simplelog;
+#[macro_use]
+extern crate log;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
@@ -19,8 +20,31 @@ mod visit;
 use chrono::NaiveDateTime;
 use shared::{check_response, Config, Error, Secrets};
 
-#[macro_use]
-extern crate log;
+struct Logger {}
+impl log::Log for Logger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let level_string = record.level().to_string();
+        let target = if record.target().len() > 0 {
+            record.target()
+        } else {
+            record.module_path().unwrap_or_default()
+        };
+        eprintln!(
+            "{} {:<5} [{}] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
+            level_string,
+            target,
+            record.args());
+    }
+
+    fn flush(&self) {
+    }
+}
+static LOGGER: Logger = Logger{};
 
 fn derive_secrets(password: &str) -> Secrets {
     // Derive secrets from password, since we need the same value every time
@@ -414,13 +438,7 @@ fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
-    simplelog::TermLogger::init(
-        simplelog::LevelFilter::Trace,
-        simplelog::Config::default(),
-        simplelog::TerminalMode::Stderr,
-    )
-    .map_err(|_| Error::Msg("Unable to init log"))?;
-
+    log::set_logger(&LOGGER).unwrap();
     let (config, matches) = parse_config()?;
     log::set_max_level(config.verbosity);
     debug!("Config {:?}", config);
