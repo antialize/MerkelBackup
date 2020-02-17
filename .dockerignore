@@ -1,7 +1,11 @@
 target
+tmp
+opt
 .git
 *.db
 Dockerfile
 .dockerignore
 .gitignore
-
+*.events
+*.zst
+mb*.toml

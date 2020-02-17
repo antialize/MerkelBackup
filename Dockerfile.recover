@@ -1,0 +1,3 @@
+FROM sadmin.scalgo.com/merkelbackup
+COPY recover-entrypoint.sh /
+ENTRYPOINT ["/recover-entrypoint.sh"]
