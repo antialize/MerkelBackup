@@ -45,13 +45,13 @@ impl log::Log for Logger {
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
             level_string,
             target,
-            record.args());
+            record.args()
+        );
     }
 
-    fn flush(&self) {
-    }
+    fn flush(&self) {}
 }
-static LOGGER: Logger = Logger{};
+static LOGGER: Logger = Logger {};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

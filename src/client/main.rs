@@ -38,13 +38,13 @@ impl log::Log for Logger {
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
             level_string,
             target,
-            record.args());
+            record.args()
+        );
     }
 
-    fn flush(&self) {
-    }
+    fn flush(&self) {}
 }
-static LOGGER: Logger = Logger{};
+static LOGGER: Logger = Logger {};
 
 fn derive_secrets(password: &str) -> Secrets {
     // Derive secrets from password, since we need the same value every time
