@@ -742,13 +742,23 @@ pub fn run_prune(
     dry: bool,
     age: Option<u32>,
 ) -> Result<bool, Error> {
-    let client = reqwest::Client::new();
-
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
+    let client = reqwest::Client::new();
+
     let mut used: HashSet<String> = HashSet::new();
+
+    info!("Fetching chunk list");
+    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
+    let content = check_response(&mut || {
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()
+    })?
+    .text()?;
 
     let (_, ok) = find_entries(
         &config,
@@ -793,16 +803,6 @@ pub fn run_prune(
             }
         },
     )?;
-
-    info!("Fetching chunk list");
-    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-    let content = check_response(&mut || {
-        client
-            .get(&url[..])
-            .basic_auth(&config.user, Some(&config.password))
-            .send()
-    })?
-    .text()?;
 
     let mut total = 0;
     let mut removed_size = 0;
