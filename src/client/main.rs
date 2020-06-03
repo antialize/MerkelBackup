@@ -450,54 +450,36 @@ fn main() -> Result<(), Error> {
             backup::run(config, secrets)?;
             true
         } else if let Some(m) = matches.subcommand_matches("validate") {
-            visit::run(
-                config,
-                secrets,
-                visit::Mode::Validate {
-                    full: m.is_present("full"),
-                },
-            )?
+            visit::run_validate(config, secrets, m.is_present("full"))?
         } else if let Some(m) = matches.subcommand_matches("prune") {
-            visit::run(
+            visit::run_prune(
                 config,
                 secrets,
-                visit::Mode::Prune {
-                    dry: m.is_present("dry"),
-                    age: m.value_of("age").map(|f| f.parse().unwrap()),
-                },
+                m.is_present("dry"),
+                m.value_of("age").map(|f| f.parse().unwrap()),
             )?
         } else if let Some(m) = matches.subcommand_matches("restore") {
-            visit::run(
+            visit::run_restore(
                 config,
                 secrets,
-                visit::Mode::Restore {
-                    root: m
-                        .value_of("root")
-                        .ok_or(Error::Msg("Missing root"))?
-                        .to_string(),
-                    pattern: std::path::PathBuf::from(
-                        m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
-                    ),
-                    dest: std::path::PathBuf::from(
-                        m.value_of("dest").ok_or(Error::Msg("Missing dest"))?,
-                    ),
-                    dry: m.is_present("dry"),
-                    preserve_owner: m.is_present("preserve_owner"),
-                },
+                m.value_of("root")
+                    .ok_or(Error::Msg("Missing root"))?
+                    .to_string(),
+                m.is_present("dry"),
+                std::path::PathBuf::from(m.value_of("dest").ok_or(Error::Msg("Missing dest"))?),
+                m.is_present("preserve_owner"),
+                std::path::PathBuf::from(
+                    m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
+                ),
             )?
         } else if let Some(m) = matches.subcommand_matches("cat") {
-            visit::run(
+            visit::run_cat(
                 config,
                 secrets,
-                visit::Mode::Cat {
-                    root: m
-                        .value_of("root")
-                        .ok_or(Error::Msg("Missing root"))?
-                        .to_string(),
-                    path: std::path::PathBuf::from(
-                        m.value_of("path").ok_or(Error::Msg("Missing path"))?,
-                    ),
-                },
+                m.value_of("root")
+                    .ok_or(Error::Msg("Missing root"))?
+                    .to_string(),
+                std::path::PathBuf::from(m.value_of("path").ok_or(Error::Msg("Missing path"))?),
             )?
         } else if let Some(m) = matches.subcommand_matches("delete-root") {
             delete_root(m.value_of("root").unwrap(), config, secrets)?;
