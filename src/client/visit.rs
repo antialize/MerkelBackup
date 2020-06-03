@@ -744,11 +744,11 @@ pub fn run_prune(
 ) -> Result<bool, Error> {
     let client = reqwest::Client::new();
 
-    let mut entries: Vec<Ent> = Vec::new();
-
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
+
+    let mut used: HashSet<String> = HashSet::new();
 
     let (_, ok) = find_entries(
         &config,
@@ -785,7 +785,12 @@ pub fn run_prune(
             }
         },
         |ent| {
-            entries.push(ent);
+            if ent.etype == EType::Link || ent.etype == EType::Dir {
+                return;
+            }
+            for chunk in ent.chunks.iter() {
+                used.insert(chunk.to_owned());
+            }
         },
     )?;
 
@@ -798,16 +803,6 @@ pub fn run_prune(
             .send()
     })?
     .text()?;
-
-    let mut used: HashSet<&str> = HashSet::new();
-    for ent in entries.iter() {
-        if ent.etype == EType::Link || ent.etype == EType::Dir {
-            continue;
-        }
-        for chunk in ent.chunks.iter() {
-            used.insert(chunk);
-        }
-    }
 
     let mut total = 0;
     let mut removed_size = 0;
