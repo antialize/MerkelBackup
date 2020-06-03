@@ -838,7 +838,7 @@ pub fn run_prune(
 
     use itertools::Itertools;
 
-    for group in &remove.iter().enumerate().chunks(20480) {
+    for group in &remove.iter().enumerate().chunks(2048) {
         let mut data = String::new();
 
         let mut last_idx = 0;
