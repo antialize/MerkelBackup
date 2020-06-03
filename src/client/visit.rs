@@ -856,13 +856,17 @@ pub fn run_prune(
         }
         let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
 
-        check_response(&mut || {
+        match check_response(&mut || {
             client
                 .delete(&url[..])
                 .basic_auth(&config.user, Some(&config.password))
                 .body(data.clone())
                 .send()
-        })?;
+        }) {
+            Ok(_) => (),
+            Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => (),
+            Err(e) => Err(e)?,
+        };
 
         if let Some(pb) = &mut pb {
             pb.add(sum_size);
