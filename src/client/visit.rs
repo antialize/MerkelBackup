@@ -457,105 +457,6 @@ fn partial_validate(
     Ok(ok)
 }
 
-fn prune(
-    dry: bool,
-    entries: &[Ent],
-    client: &mut reqwest::Client,
-    config: &Config,
-    secrets: &Secrets,
-) -> Result<(), Error> {
-    info!("Fetching chunk list",);
-    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-    let content = check_response(&mut || {
-        client
-            .get(&url[..])
-            .basic_auth(&config.user, Some(&config.password))
-            .send()
-    })?
-    .text()?;
-
-    let mut used: HashSet<&str> = HashSet::new();
-    for ent in entries.iter() {
-        if ent.etype == EType::Link || ent.etype == EType::Dir {
-            continue;
-        }
-        for chunk in ent.chunks.iter() {
-            used.insert(chunk);
-        }
-    }
-
-    let mut total = 0;
-    let mut removed_size = 0;
-    let mut remove = Vec::new();
-    for row in content.split('\n') {
-        if row.is_empty() {
-            continue;
-        }
-        let mut row = row.split(' ');
-        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
-        let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
-        total += 1;
-        if used.contains(chunk) {
-            continue;
-        }
-        removed_size += size;
-        remove.push((chunk, size));
-    }
-
-    info!("Removing {} of {} chunks", remove.len(), total);
-    if dry {
-        return Ok(());
-    }
-
-    let mut pb = if config.verbosity >= log::LevelFilter::Info {
-        let mut pb = ProgressBar::new(removed_size);
-        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
-        pb.set_units(pbr::Units::Bytes);
-        Some(pb)
-    } else {
-        None
-    };
-
-    use itertools::Itertools;
-
-    for group in &remove.iter().enumerate().chunks(20480) {
-        let mut data = String::new();
-
-        let mut last_idx = 0;
-        let mut sum_size = 0;
-        for (idx, (chunk, size)) in group {
-            last_idx = idx;
-            sum_size += size;
-            if !data.is_empty() {
-                data.push('\0');
-            }
-            data.push_str(chunk);
-        }
-        if let Some(pb) = &mut pb {
-            pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
-        }
-        let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-
-        check_response(&mut || {
-            client
-                .delete(&url[..])
-                .basic_auth(&config.user, Some(&config.password))
-                .body(data.clone())
-                .send()
-        })?;
-
-        if let Some(pb) = &mut pb {
-            pb.add(sum_size);
-        }
-    }
-
-    if let Some(pb) = &mut pb {
-        pb.finish();
-    }
-
-    Ok(())
-}
-
 pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
     let mut client = reqwest::Client::new();
     let root_visit = roots(&config, &secrets, &client, None)?;
@@ -841,7 +742,7 @@ pub fn run_prune(
     dry: bool,
     age: Option<u32>,
 ) -> Result<bool, Error> {
-    let mut client = reqwest::Client::new();
+    let client = reqwest::Client::new();
 
     let mut entries: Vec<Ent> = Vec::new();
 
@@ -888,6 +789,93 @@ pub fn run_prune(
         },
     )?;
 
-    prune(dry, &entries, &mut client, &config, &secrets)?;
+    info!("Fetching chunk list");
+    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
+    let content = check_response(&mut || {
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()
+    })?
+    .text()?;
+
+    let mut used: HashSet<&str> = HashSet::new();
+    for ent in entries.iter() {
+        if ent.etype == EType::Link || ent.etype == EType::Dir {
+            continue;
+        }
+        for chunk in ent.chunks.iter() {
+            used.insert(chunk);
+        }
+    }
+
+    let mut total = 0;
+    let mut removed_size = 0;
+    let mut remove = Vec::new();
+    for row in content.split('\n') {
+        if row.is_empty() {
+            continue;
+        }
+        let mut row = row.split(' ');
+        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
+        let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
+        total += 1;
+        if used.contains(chunk) {
+            continue;
+        }
+        removed_size += size;
+        remove.push((chunk, size));
+    }
+
+    info!("Removing {} of {} chunks", remove.len(), total);
+    if dry {
+        return Ok(ok);
+    }
+
+    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+        let mut pb = ProgressBar::new(removed_size);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        pb.set_units(pbr::Units::Bytes);
+        Some(pb)
+    } else {
+        None
+    };
+
+    use itertools::Itertools;
+
+    for group in &remove.iter().enumerate().chunks(20480) {
+        let mut data = String::new();
+
+        let mut last_idx = 0;
+        let mut sum_size = 0;
+        for (idx, (chunk, size)) in group {
+            last_idx = idx;
+            sum_size += size;
+            if !data.is_empty() {
+                data.push('\0');
+            }
+            data.push_str(chunk);
+        }
+        if let Some(pb) = &mut pb {
+            pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
+        }
+        let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
+
+        check_response(&mut || {
+            client
+                .delete(&url[..])
+                .basic_auth(&config.user, Some(&config.password))
+                .body(data.clone())
+                .send()
+        })?;
+
+        if let Some(pb) = &mut pb {
+            pb.add(sum_size);
+        }
+    }
+
+    if let Some(pb) = &mut pb {
+        pb.finish();
+    }
     Ok(ok)
 }
