@@ -112,27 +112,6 @@ fn get_root(
     )?)?)?)
 }
 
-pub enum Mode {
-    Validate {
-        full: bool,
-    },
-    Prune {
-        dry: bool,
-        age: Option<u32>,
-    },
-    Restore {
-        root: String,
-        pattern: PathBuf,
-        dest: PathBuf,
-        dry: bool,
-        preserve_owner: bool,
-    },
-    Cat {
-        root: String,
-        path: PathBuf,
-    },
-}
-
 struct Ent {
     etype: EType,
     path: std::path::PathBuf,
@@ -144,7 +123,7 @@ struct Ent {
     chunks: Vec<String>,
 }
 
-fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
+fn row_entry(row: &str) -> Result<Option<Ent>, Error> {
     if row.is_empty() {
         return Ok(None);
     }
@@ -160,19 +139,6 @@ fn row_ent(row: &str, mode: &Mode) -> Result<Option<Ent>, Error> {
     let mtime: i64 = ans.next().ok_or(Error::Msg("Missing mtime"))?.parse()?;
     let _ctime: i64 = ans.next().ok_or(Error::Msg("Missing ctime"))?.parse()?;
     let path = PathBuf::from_str(name).map_err(|_| Error::Msg("Bad path"))?;
-    match &mode {
-        Mode::Validate { .. } | Mode::Prune { .. } => {}
-        Mode::Restore { pattern, .. } => {
-            if !(path.starts_with(pattern) || (pattern.starts_with(&path) && etype == EType::Dir)) {
-                return Ok(None);
-            }
-        }
-        Mode::Cat { path: cat_path, .. } => {
-            if &path != cat_path {
-                return Ok(None);
-            }
-        }
-    };
 
     Ok(Some(Ent {
         path,
@@ -491,105 +457,6 @@ fn partial_validate(
     Ok(ok)
 }
 
-fn prune(
-    dry: bool,
-    entries: &[Ent],
-    client: &mut reqwest::Client,
-    config: &Config,
-    secrets: &Secrets,
-) -> Result<(), Error> {
-    info!("Fetching chunk list",);
-    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-    let content = check_response(&mut || {
-        client
-            .get(&url[..])
-            .basic_auth(&config.user, Some(&config.password))
-            .send()
-    })?
-    .text()?;
-
-    let mut used: HashSet<&str> = HashSet::new();
-    for ent in entries.iter() {
-        if ent.etype == EType::Link || ent.etype == EType::Dir {
-            continue;
-        }
-        for chunk in ent.chunks.iter() {
-            used.insert(chunk);
-        }
-    }
-
-    let mut total = 0;
-    let mut removed_size = 0;
-    let mut remove = Vec::new();
-    for row in content.split('\n') {
-        if row.is_empty() {
-            continue;
-        }
-        let mut row = row.split(' ');
-        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
-        let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
-        total += 1;
-        if used.contains(chunk) {
-            continue;
-        }
-        removed_size += size;
-        remove.push((chunk, size));
-    }
-
-    info!("Removing {} of {} chunks", remove.len(), total);
-    if dry {
-        return Ok(());
-    }
-
-    let mut pb = if config.verbosity >= log::LevelFilter::Info {
-        let mut pb = ProgressBar::new(removed_size);
-        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
-        pb.set_units(pbr::Units::Bytes);
-        Some(pb)
-    } else {
-        None
-    };
-
-    use itertools::Itertools;
-
-    for group in &remove.iter().enumerate().chunks(20480) {
-        let mut data = String::new();
-
-        let mut last_idx = 0;
-        let mut sum_size = 0;
-        for (idx, (chunk, size)) in group {
-            last_idx = idx;
-            sum_size += size;
-            if !data.is_empty() {
-                data.push('\0');
-            }
-            data.push_str(chunk);
-        }
-        if let Some(pb) = &mut pb {
-            pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
-        }
-        let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
-
-        check_response(&mut || {
-            client
-                .delete(&url[..])
-                .basic_auth(&config.user, Some(&config.password))
-                .body(data.clone())
-                .send()
-        })?;
-
-        if let Some(pb) = &mut pb {
-            pb.add(sum_size);
-        }
-    }
-
-    if let Some(pb) = &mut pb {
-        pb.finish();
-    }
-
-    Ok(())
-}
-
 pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
     let mut client = reqwest::Client::new();
     let root_visit = roots(&config, &secrets, &client, None)?;
@@ -617,7 +484,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
         total_size += v.len() as u64;
 
         for row in v.split("\0\0") {
-            match row_ent(row, &Mode::Validate { full: false }) {
+            match row_entry(row) {
                 Ok(None) => {}
                 Ok(Some(ent)) => {
                     size += ent.size;
@@ -660,7 +527,7 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
             Ok(v) => v,
         };
         for row in v.split("\0\0") {
-            match row_ent(row, &Mode::Validate { full: false }) {
+            match row_entry(row) {
                 Ok(None) => {}
                 Ok(Some(ent)) => {
                     let etype = format!("{}", ent.etype);
@@ -681,35 +548,225 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
     Ok(())
 }
 
-pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> {
+fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<bool, Error>>(
+    config: &Config,
+    secrets: &Secrets,
+    only_root: Option<&str>,
+    mut filter_root: Filter,
+    mut handle_entry: Handler,
+) -> Result<(bool, bool), Error> {
+    let mut client = reqwest::Client::new();
+    let mut root_found = false;
+    let mut ok = true;
+    let x = roots(&config, &secrets, &client, only_root)?;
+    for root in x.iter() {
+        let root = root?;
+        root_found = true;
+        if !filter_root(&root)? {
+            continue;
+        }
+        info!(
+            "Visiting root {} {}",
+            root.host,
+            NaiveDateTime::from_timestamp(root.time, 0)
+        );
+
+        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+            Err(e) => {
+                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                ok = false;
+                continue;
+            }
+            Ok(v) => v,
+        };
+
+        handle_entry(Ent {
+            path: PathBuf::new(),
+            etype: EType::Root,
+            size: 0,
+            st_mode: 0,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            chunks: vec![root.hash.to_string()],
+        });
+
+        for row in v.split("\0\0") {
+            match row_entry(row) {
+                Ok(None) => {}
+                Ok(Some(ent)) => {
+                    handle_entry(ent);
+                }
+                Err(e) => {
+                    ok = false;
+                    error!("Bad row '{}`: {:?}", row, e);
+                }
+            }
+        }
+    }
+    Ok((root_found, ok))
+}
+
+pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool, Error> {
     let mut client = reqwest::Client::new();
 
     let mut entries: Vec<Ent> = Vec::new();
 
+    let (_, mut ok) = find_entries(
+        &config,
+        &secrets,
+        None,
+        |_| Ok(true),
+        |ent| {
+            entries.push(ent);
+        },
+    )?;
+
+    if full {
+        ok = full_validate(&entries, &mut client, &config, &secrets)? && ok;
+    } else {
+        ok = partial_validate(&entries, &mut client, &config, &secrets)? && ok;
+    }
+    Ok(ok)
+}
+
+pub fn run_restore(
+    config: Config,
+    secrets: Secrets,
+    root: String,
+    dry: bool,
+    dest: PathBuf,
+    preserve_owner: bool,
+    pattern: PathBuf,
+) -> Result<bool, Error> {
+    let mut entries: Vec<Ent> = Vec::new();
+
+    let (root_found, ok) = find_entries(
+        &config,
+        &secrets,
+        Some(root.as_ref()),
+        |_| Ok(true),
+        |ent| {
+            if ent.path.starts_with(&pattern)
+                || (pattern.starts_with(&ent.path) && ent.etype == EType::Dir)
+            {
+                entries.push(ent);
+            }
+        },
+    )?;
+
+    if !root_found {
+        return Err(Error::Msg("Root not found"));
+    }
+    let bytes = entries.iter().map(|e| e.size).sum();
+    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+        let mut pb = ProgressBar::new(bytes);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        pb.set_units(pbr::Units::Bytes);
+        Some(pb)
+    } else {
+        None
+    };
+
+    let mut client = reqwest::Client::new();
+
+    for ent in entries {
+        if let Err(e) = recover_entry(
+            &mut pb,
+            &ent,
+            dry,
+            &dest,
+            preserve_owner,
+            &mut client,
+            &config,
+            &secrets,
+        ) {
+            error!("Unable to recover entry {:?}: {:?}", ent.path, e);
+            return Err(e);
+        }
+    }
+    Ok(ok)
+}
+
+pub fn run_cat(
+    config: Config,
+    secrets: Secrets,
+    root: String,
+    path: PathBuf,
+) -> Result<bool, Error> {
+    let mut entries: Vec<Ent> = Vec::new();
+
+    let (root_found, ok) = find_entries(
+        &config,
+        &secrets,
+        Some(root.as_ref()),
+        |_| Ok(true),
+        |ent| {
+            if &ent.path == &path {
+                entries.push(ent);
+            }
+        },
+    )?;
+
+    if !root_found {
+        return Err(Error::Msg("Root not found"));
+    }
+    let mut it = entries.iter();
+    let _root = it.next().unwrap();
+    let ent = match it.next() {
+        None => return Err(Error::Msg("Path not found")),
+        Some(ent) => ent,
+    };
+    match ent.etype {
+        EType::File => {}
+        EType::Root | EType::Dir | EType::Link => {
+            panic!("Expected file but got {}", ent.etype);
+            //return Err(Error::Msg("Expected file but got some other type"));
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+
+    let mut client = reqwest::Client::new();
+
+    for chunk in ent.chunks.iter() {
+        let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
+        handle.write_all(&res)?;
+    }
+    Ok(ok)
+}
+
+pub fn run_prune(
+    config: Config,
+    secrets: Secrets,
+    dry: bool,
+    age: Option<u32>,
+) -> Result<bool, Error> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    let mut root_found = false;
+    let client = reqwest::Client::new();
 
-    let root: Option<&str> = match &mode {
-        Mode::Validate { .. } | Mode::Prune { .. } => None,
-        Mode::Restore { root, .. } | Mode::Cat { root, .. } => Some(root),
-    };
+    let mut used: HashSet<String> = HashSet::new();
 
-    let mut ok = true;
+    info!("Fetching chunk list");
+    let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
+    let content = check_response(&mut || {
+        client
+            .get(&url[..])
+            .basic_auth(&config.user, Some(&config.password))
+            .send()
+    })?
+    .text()?;
 
-    for root in roots(&config, &secrets, &client, root)?.iter() {
-        let root = root?;
-        root_found = true;
-        match &mode {
-            Mode::Validate { .. } | Mode::Restore { .. } | Mode::Cat { .. } => {}
-            Mode::Prune { dry, age: None } => {}
-            Mode::Prune {
-                dry,
-                age: Some(age),
-            } => {
-                if root.time + 60 * 60 * 24 * i64::from(*age) < now {
+    let (_, ok) = find_entries(
+        &config,
+        &secrets,
+        None,
+        |root| {
+            if let Some(age) = age {
+                if root.time + 60 * 60 * 24 * i64::from(age) < now {
                     info!(
                         "Removing root {} {}",
                         root.host,
@@ -729,117 +786,95 @@ pub fn run(config: Config, secrets: Secrets, mode: Mode) -> Result<bool, Error> 
                                 .send()
                         })?;
                     }
-                    continue;
+                    Ok(false)
+                } else {
+                    Ok(true)
                 }
+            } else {
+                Ok(true)
             }
-        }
-        info!(
-            "Visiting root {} {}",
-            root.host,
-            NaiveDateTime::from_timestamp(root.time, 0)
-        );
+        },
+        |ent| {
+            if ent.etype == EType::Link || ent.etype == EType::Dir {
+                return;
+            }
+            for chunk in ent.chunks.iter() {
+                used.insert(chunk.to_owned());
+            }
+        },
+    )?;
 
-        let v = match get_root(&mut client, &config, &secrets, root.hash) {
-            Err(e) => {
-                error!("Bad root {}: {:?}", root.hash.to_string(), e);
-                ok = false;
-                continue;
+    let mut total = 0;
+    let mut removed_size = 0;
+    let mut remove = Vec::new();
+    for row in content.split('\n') {
+        if row.is_empty() {
+            continue;
+        }
+        let mut row = row.split(' ');
+        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
+        let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
+        total += 1;
+        if used.contains(chunk) {
+            continue;
+        }
+        removed_size += size;
+        remove.push((chunk, size));
+    }
+
+    info!("Removing {} of {} chunks", remove.len(), total);
+    if dry {
+        return Ok(ok);
+    }
+
+    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+        let mut pb = ProgressBar::new(removed_size);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
+        pb.set_units(pbr::Units::Bytes);
+        Some(pb)
+    } else {
+        None
+    };
+
+    use itertools::Itertools;
+
+    for group in &remove.iter().enumerate().chunks(2048) {
+        let mut data = String::new();
+
+        let mut last_idx = 0;
+        let mut sum_size = 0;
+        for (idx, (chunk, size)) in group {
+            last_idx = idx;
+            sum_size += size;
+            if !data.is_empty() {
+                data.push('\0');
             }
-            Ok(v) => v,
+            data.push_str(chunk);
+        }
+        if let Some(pb) = &mut pb {
+            pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
+        }
+        let url = format!("{}/chunks/{}", &config.server, hex::encode(&secrets.bucket));
+
+        match check_response(&mut || {
+            client
+                .delete(&url[..])
+                .basic_auth(&config.user, Some(&config.password))
+                .body(data.clone())
+                .send()
+        }) {
+            Ok(_) => (),
+            Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => (),
+            Err(e) => Err(e)?,
         };
 
-        entries.push(Ent {
-            path: PathBuf::new(),
-            etype: EType::Root,
-            size: 0,
-            st_mode: 0,
-            uid: 0,
-            gid: 0,
-            mtime: 0,
-            chunks: vec![root.hash.to_string()],
-        });
-
-        for row in v.split("\0\0") {
-            match row_ent(row, &mode) {
-                Ok(None) => {}
-                Ok(Some(ent)) => {
-                    entries.push(ent);
-                }
-                Err(e) => {
-                    ok = false;
-                    error!("Bad row '{}`: {:?}", row, e);
-                }
-            }
+        if let Some(pb) = &mut pb {
+            pb.add(sum_size);
         }
     }
 
-    match &mode {
-        Mode::Validate { full } => {
-            if *full {
-                ok = full_validate(&entries, &mut client, &config, &secrets)? && ok;
-            } else {
-                ok = partial_validate(&entries, &mut client, &config, &secrets)? && ok;
-            }
-        }
-        Mode::Prune { dry, .. } => prune(*dry, &entries, &mut client, &config, &secrets)?,
-        Mode::Restore {
-            dry,
-            dest,
-            preserve_owner,
-            ..
-        } => {
-            if !root_found {
-                return Err(Error::Msg("Root not found"));
-            }
-            let bytes = entries.iter().map(|e| e.size).sum();
-            let mut pb = if config.verbosity >= log::LevelFilter::Info {
-                let mut pb = ProgressBar::new(bytes);
-                pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
-                pb.set_units(pbr::Units::Bytes);
-                Some(pb)
-            } else {
-                None
-            };
-            for ent in entries {
-                if let Err(e) = recover_entry(
-                    &mut pb,
-                    &ent,
-                    *dry,
-                    &dest,
-                    *preserve_owner,
-                    &mut client,
-                    &config,
-                    &secrets,
-                ) {
-                    error!("Unable to recover entry {:?}: {:?}", ent.path, e);
-                    return Err(e);
-                }
-            }
-        }
-        Mode::Cat { .. } => {
-            if !root_found {
-                return Err(Error::Msg("Root not found"));
-            }
-            let mut it = entries.iter();
-            let _root = it.next().unwrap();
-            let ent = match it.next() {
-                None => return Err(Error::Msg("Path not found")),
-                Some(ent) => ent,
-            };
-            match ent.etype {
-                EType::File => {}
-                EType::Root | EType::Dir | EType::Link => {
-                    panic!("Expected file but got {}", ent.etype);
-                    //return Err(Error::Msg("Expected file but got some other type"));
-                }
-            };
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            for chunk in ent.chunks.iter() {
-                let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
-                handle.write_all(&res)?;
-            }
-        }
+    if let Some(pb) = &mut pb {
+        pb.finish();
     }
     Ok(ok)
 }
