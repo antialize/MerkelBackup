@@ -11,7 +11,7 @@ echo "fn main() {panic!(\"OH NO\")}" > src/server/main.rs
 RUN CARGO_TARGET_DIR=target cargo install --root /usr --path .
 RUN rm -f target/release/deps/mbackup*
 COPY src/ src/
-RUN CARGO_TARGET_DIR=target cargo install --root /usr --path .
+RUN CARGO_TARGET_DIR=target cargo install --offline --root /usr --path .
 
 FROM rust
 COPY --from=builder /usr/bin/mbackupd /usr/bin/mbackupd
