@@ -1,6 +1,6 @@
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use rusqlite::params;
+use rusqlite::{params, NO_PARAMS};
 use std::sync::Arc;
 
 use crate::config::{AccessType, SMALL_SIZE};
@@ -153,6 +153,7 @@ async fn handle_put_chunk(
 
         let mut rows = stmt.query(params![bucket, chunk]).unwrap();
         if rows.next().expect("Unable to read db row").is_some() {
+            state.stat.put_chunk_already_there.inc();
             return handle_error!(StatusCode::CONFLICT, "Already there", "");
         }
     }
@@ -167,8 +168,11 @@ async fn handle_put_chunk(
     }
 
     let len = v.len();
+    state.stat.put_chunk_bytes.add(len);
+
     // Small content is stored directly in the DB
     if len < SMALL_SIZE {
+        state.stat.put_chunk_small.inc();
         let conn = state.conn.lock().unwrap();
         tryfut!(
             conn.execute(
@@ -179,6 +183,7 @@ async fn handle_put_chunk(
             "Insert failed",
         );
     } else {
+        state.stat.put_chunk_large.inc();
         // Large content is stored on disk. We first store the data in a temp upload folder
         // and then atomically rename into its right location
         tryfut!(
@@ -275,6 +280,11 @@ async fn handle_get_chunk(
                 (id, content, size)
             }
             None => {
+                if head {
+                    state.stat.get_chunk_head_missing.inc();
+                } else {
+                    state.stat.get_chunk_missing.inc();
+                }
                 return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
             }
         };
@@ -282,6 +292,7 @@ async fn handle_get_chunk(
     };
 
     if head {
+        state.stat.get_chunk_head_found.inc();
         info!("{}:{}: head chunk {} success", file!(), line!(), chunk);
         return Ok(Response::builder()
             .status(StatusCode::OK)
@@ -290,8 +301,12 @@ async fn handle_get_chunk(
             .unwrap());
     }
     let content = match content {
-        Some(content) => content,
+        Some(content) => {
+            state.stat.get_chunk_small.inc();
+            content
+        }
         None => {
+            state.stat.get_chunk_large.inc();
             let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
             match std::fs::read(path) {
                 //TODO use tokio for async fileread
@@ -302,7 +317,7 @@ async fn handle_get_chunk(
             }
         }
     };
-
+    state.stat.get_chunk_bytes.add(size as usize);
     info!("{}:{}: get chunk {} success", file!(), line!(), chunk);
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -369,7 +384,7 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
         );
         count
     };
-
+    state.stat.chunks_deleted.add(count);
     if count != chunks.len() {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
@@ -386,6 +401,7 @@ async fn handle_delete_chunk(
         warn!("Unauthorized access for delete chunk {}/{}", bucket, chunk);
         return res;
     }
+    state.stat.delete_chunk_count.inc();
 
     tryfut!(
         check_hash(bucket.as_ref()),
@@ -411,6 +427,7 @@ async fn handle_delete_chunks(
         warn!("Unauthorized access for delete chunks {}", bucket);
         return res;
     }
+    state.stat.delete_chunks_count.inc();
 
     tryfut!(
         check_hash(bucket.as_ref()),
@@ -463,6 +480,8 @@ async fn handle_list_chunks(
         "Bad bucket"
     );
 
+    state.stat.list_chunks_count.inc();
+
     let ans = {
         let mut ans = "".to_string();
         let conn = state.conn.lock().unwrap();
@@ -499,6 +518,7 @@ async fn handle_list_chunks(
             } else {
                 ans.push_str(&format!("{} {}\n", chunk, size));
             }
+            state.stat.list_chunks_entries.inc();
         }
         ans
     };
@@ -519,6 +539,8 @@ async fn handle_get_status(
         StatusCode::BAD_REQUEST,
         "Bad bucket"
     );
+
+    state.stat.get_status_count.inc();
 
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn
@@ -543,6 +565,8 @@ async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>)
         StatusCode::BAD_REQUEST,
         "Bad bucket"
     );
+
+    state.stat.get_roots_count.inc();
 
     let ans = {
         let conn = state.conn.lock().unwrap();
@@ -594,6 +618,8 @@ async fn handle_put_root(
         return handle_error!(StatusCode::BAD_REQUEST, "Bad host name", "");
     }
 
+    state.stat.put_root_count.inc();
+
     let mut body = req.into_body();
     let mut v = Vec::new();
     while let Some(chunk) = body.data().await {
@@ -640,6 +666,9 @@ async fn handle_delete_root(
         StatusCode::BAD_REQUEST,
         "Bad bucket"
     );
+
+    state.stat.delete_root_count.inc();
+
     let res = state.conn.lock().unwrap().execute(
         "DELETE FROM roots WHERE bucket=? AND id=?",
         params![bucket, root],
@@ -649,6 +678,91 @@ async fn handle_delete_root(
         Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
         Ok(_) => ok_message(None),
     }
+}
+
+async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    use std::fmt::Write;
+    if let Some(token) = &state.config.metrics_token {
+        if req.uri().query() != Some(token.as_str()) {
+            return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
+        }
+    }
+
+    let mut ans = String::new();
+    let s = &state.stat;
+    for (counter, name) in [
+        (&s.put_chunk_already_there, "put_chunk_already_there_total"),
+        (&s.put_chunk_small, "put_chunk_small_total"),
+        (&s.put_chunk_large, "put_chunk_large_total"),
+        (&s.put_chunk_bytes, "put_chunk_bytes_bytes"),
+        (&s.get_chunk_head_missing, "get_chunk_head_missing_total"),
+        (&s.get_chunk_head_found, "get_chunk_head_found_total"),
+        (&s.get_chunk_missing, "get_chunk_missing_total"),
+        (&s.get_chunk_small, "get_chunk_small_total"),
+        (&s.get_chunk_large, "get_chunk_large_total"),
+        (&s.get_chunk_bytes, "get_chunk_bytes_bytes"),
+        (&s.delete_root_count, "delete_root_count_total"),
+        (&s.put_root_count, "put_root_count_total"),
+        (&s.get_roots_count, "get_roots_count_total"),
+        (&s.get_status_count, "get_status_count_total"),
+        (&s.list_chunks_count, "list_chunks_count_total"),
+        (&s.list_chunks_entries, "list_chunks_entries_total"),
+        (&s.delete_chunks_count, "delete_chunks_count_total"),
+        (&s.chunks_deleted, "chunks_deleted_total"),
+        (&s.delete_chunk_count, "delete_chunk_count_total"),
+    ]
+    .iter()
+    {
+        write!(
+            ans,
+            "# TYPE merkelbackup_{} counter\nmerkelbackup_{} {}\n\n",
+            name,
+            name,
+            counter.read()
+        )
+        .unwrap();
+    }
+
+    write!(ans, "# TYPE merkelbackup_rows_total counter\n",).unwrap();
+
+    for table in ["roots", "chunks", "deletes"].iter() {
+        let cnt: i64 = tryfut!(
+            state.conn.lock().unwrap().query_row(
+                format!("SELECT COUNT(*) FROM {}", table).as_str(),
+                NO_PARAMS,
+                |row| row.get(0),
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Select failed"
+        );
+
+        write!(
+            ans,
+            "merkelbackup_rows_total{{merkelbackup_table=\"{}\"}} {}\n\n",
+            table, cnt
+        )
+        .unwrap();
+    }
+
+    for (name, time) in [
+        ("start", &s.start_time),
+        ("current", &std::time::SystemTime::now()),
+    ]
+    .iter()
+    {
+        write!(
+            ans,
+            "# TYPE merkelbackup_{}_time_seconds counter\nmerkelbackup_{}_time_seconds {}\n\n",
+            name,
+            name,
+            time.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64()
+        )
+        .unwrap();
+    }
+
+    ok_message(Some(ans))
 }
 
 pub async fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
@@ -678,6 +792,8 @@ pub async fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFutu
         handle_put_root(path[2].clone(), path[3].clone(), req, state).await
     } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "roots" {
         handle_delete_root(path[2].clone(), path[3].clone(), req, state).await
+    } else if req.method() == Method::GET && path.len() == 2 && path[1] == "metrics" {
+        handle_get_metrics(req, state).await
     } else {
         handle_error!(StatusCode::NOT_FOUND, "Not found", req.uri())
     }

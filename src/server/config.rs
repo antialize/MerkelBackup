@@ -59,6 +59,7 @@ pub struct Config {
     pub bind: String,
     pub data_dir: String,
     pub users: Vec<User>,
+    pub metrics_token: Option<String>,
 }
 
 /// Provide default values for the configuration
@@ -69,6 +70,7 @@ impl Default for Config {
             bind: "0.0.0.0:3321".to_string(),
             data_dir: ".".to_string(),
             users: Vec::new(),
+            metrics_token: std::env::var("METRICS_TOKEN").ok(),
         }
     }
 }

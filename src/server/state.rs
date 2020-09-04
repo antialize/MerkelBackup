@@ -3,10 +3,54 @@ use std::sync::Mutex;
 
 use crate::config::Config;
 
+#[derive(Default)]
+pub struct StatCounter {
+    value: std::sync::atomic::AtomicUsize,
+}
+
+impl StatCounter {
+    pub fn add(&self, value: usize) {
+        self.value
+            .fetch_add(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn inc(&self) {
+        self.add(1);
+    }
+
+    pub fn read(&self) -> usize {
+        self.value.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub struct Stat {
+    pub put_chunk_already_there: StatCounter,
+    pub put_chunk_small: StatCounter,
+    pub put_chunk_large: StatCounter,
+    pub put_chunk_bytes: StatCounter,
+    pub get_chunk_head_missing: StatCounter,
+    pub get_chunk_head_found: StatCounter,
+    pub get_chunk_missing: StatCounter,
+    pub get_chunk_small: StatCounter,
+    pub get_chunk_large: StatCounter,
+    pub get_chunk_bytes: StatCounter,
+    pub delete_root_count: StatCounter,
+    pub put_root_count: StatCounter,
+    pub get_roots_count: StatCounter,
+    pub get_status_count: StatCounter,
+    pub list_chunks_count: StatCounter,
+    pub list_chunks_entries: StatCounter,
+    pub delete_chunks_count: StatCounter,
+    pub chunks_deleted: StatCounter,
+    pub delete_chunk_count: StatCounter,
+    pub start_time: std::time::SystemTime,
+}
+
 /// The state passed around the variaus methods
 pub struct State {
     pub config: Config,
     pub conn: Mutex<Connection>,
+    pub stat: Stat,
 }
 
 pub fn setup_db(conf: &Config) -> Connection {

@@ -25,7 +25,7 @@ use error::Error;
 mod handler;
 use handler::backup_serve;
 mod state;
-use state::{setup_db, State};
+use state::{setup_db, Stat, State};
 
 struct Logger {}
 impl log::Log for Logger {
@@ -62,7 +62,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     debug!("Config {:?}", config);
     let conn = Mutex::new(setup_db(&config));
-    let state = Arc::new(State { config, conn });
+    let state = Arc::new(State {
+        config,
+        conn,
+        stat: Stat {
+            put_chunk_already_there: Default::default(),
+            put_chunk_small: Default::default(),
+            put_chunk_large: Default::default(),
+            put_chunk_bytes: Default::default(),
+            get_chunk_head_missing: Default::default(),
+            get_chunk_head_found: Default::default(),
+            get_chunk_missing: Default::default(),
+            get_chunk_small: Default::default(),
+            get_chunk_large: Default::default(),
+            get_chunk_bytes: Default::default(),
+            delete_root_count: Default::default(),
+            put_root_count: Default::default(),
+            get_roots_count: Default::default(),
+            get_status_count: Default::default(),
+            list_chunks_count: Default::default(),
+            list_chunks_entries: Default::default(),
+            delete_chunks_count: Default::default(),
+            chunks_deleted: Default::default(),
+            delete_chunk_count: Default::default(),
+            start_time: std::time::SystemTime::now(),
+        },
+    });
     let addr = state.config.bind.parse().expect("Bad bind address");
     let bind = state.config.bind.clone();
 
