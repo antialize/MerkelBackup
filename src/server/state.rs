@@ -33,6 +33,13 @@ pub fn setup_db(conf: &Config) -> Connection {
     )
     .expect("Unable to create cache table");
 
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bucket_hash
+        ON chunks (bucket,hash)",
+        NO_PARAMS,
+    )
+    .expect("Unable to create cache table index");
+
     trace!("Creating roots table");
     // The roots table records the root of the merkel tree of all backups
     conn.execute(
