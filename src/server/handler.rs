@@ -723,7 +723,7 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
         .unwrap();
     }
 
-    write!(ans, "# TYPE merkelbackup_rows_total counter\n",).unwrap();
+    write!(ans, "# TYPE merkelbackup_rows_count gauge\n",).unwrap();
 
     for table in ["roots", "chunks", "deletes"].iter() {
         let cnt: i64 = tryfut!(
@@ -738,11 +738,12 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
 
         write!(
             ans,
-            "merkelbackup_rows_total{{merkelbackup_table=\"{}\"}} {}\n\n",
+            "merkelbackup_rows_count{{merkelbackup_table=\"{}\"}} {}\n",
             table, cnt
         )
         .unwrap();
     }
+    ans.push('\n');
 
     for (name, time) in [
         ("start", &s.start_time),
