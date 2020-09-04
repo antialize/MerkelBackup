@@ -400,20 +400,22 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
 
     conn.pragma_update(None, "journal_mode", &"WAL".to_string())?;
 
+    // Note that UNIQUE constraints automatically create indexes
+    // (according to experimentation).
     conn.execute(
-        "create table if not exists files (
-            path text not null unique,
-            size integer not null,
-            mtime integer not null,
-            chunks text not null
+        "CREATE TABLE IF NOT EXISTS files (
+            path TEXT NOT NULL UNIQUE,
+            size INTEGER NOT NULL,
+            mtime INTEGER NOT NULL,
+            chunks TEXT NOT NULL
         )",
         NO_PARAMS,
     )?;
 
     conn.execute(
-        "create table if not exists remote (
-            chunk text not null unique,
-            time integer not null
+        "CREATE TABLE IF NOT EXISTS remote (
+            chunk TEXT NOT NULL UNIQUE,
+            time INTEGER NOT NULL
         )",
         NO_PARAMS,
     )?;
