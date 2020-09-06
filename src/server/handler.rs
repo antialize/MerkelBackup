@@ -766,6 +766,37 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
     ok_message(Some(ans))
 }
 
+async fn handle_get_mirror(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+    let mut bit: u8 = 1;
+    let mut val: u8 = 0;
+    let mut nid: i64 = 0;
+    let mut ans = String::new();
+
+    let conn = state.conn.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
+
+    for row in stmt.query_map(NO_PARAMS, |row| Ok(row.get(0)?)).unwrap() {
+        let id: i64 = row.expect("Unable to read db row");
+        while nid <= id {
+            if bit == 127 {
+                ans.push((48 + val) as char);
+                bit = 0;
+                val = 0;
+            }
+            if id == nid {
+                val += bit
+            }
+            bit *= 2;
+            nid += 1;
+        }
+    }
+    if val != 0 {
+        ans.push((48 + val) as char);
+    }
+
+    ok_message(None)
+}
+
 pub async fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req
         .uri()
@@ -795,6 +826,8 @@ pub async fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFutu
         handle_delete_root(path[2].clone(), path[3].clone(), req, state).await
     } else if req.method() == Method::GET && path.len() == 2 && path[1] == "metrics" {
         handle_get_metrics(req, state).await
+    } else if req.method() == Method::GET && path.len() == 2 && path[1] == "mirror" {
+        handle_get_mirror(req, state).await
     } else {
         handle_error!(StatusCode::NOT_FOUND, "Not found", req.uri())
     }
