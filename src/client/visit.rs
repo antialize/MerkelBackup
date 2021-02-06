@@ -56,7 +56,7 @@ impl From<u64> for Size {
 }
 
 fn get_chunk(
-    client: &mut reqwest::Client,
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
     hash: &str,
@@ -102,7 +102,7 @@ fn get_chunk(
 }
 
 fn get_root(
-    client: &mut reqwest::Client,
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
     hash: &str,
@@ -161,7 +161,7 @@ fn recover_entry(
     dry: bool,
     dest: &PathBuf,
     preserve_owner: bool,
-    client: &mut reqwest::Client,
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
 ) -> Result<(), Error> {
@@ -309,11 +309,11 @@ impl<'l> Roots<'l> {
 pub fn roots<'a: 'b, 'b>(
     config: &Config,
     secrets: &Secrets,
-    client: &reqwest::Client,
+    client: &reqwest::blocking::Client,
     filter: Option<&'a str>,
 ) -> Result<Roots<'b>, Error> {
     let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
-    let mut res = check_response(&mut || {
+    let res = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
@@ -326,7 +326,7 @@ pub fn roots<'a: 'b, 'b>(
 
 fn full_validate(
     entries: &[Ent],
-    client: &mut reqwest::Client,
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
 ) -> Result<bool, Error> {
@@ -386,7 +386,7 @@ fn full_validate(
 
 fn partial_validate(
     entries: &[Ent],
-    client: &mut reqwest::Client,
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
 ) -> Result<bool, Error> {
@@ -458,7 +458,7 @@ fn partial_validate(
 }
 
 pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
     let root_visit = roots(&config, &secrets, &client, None)?;
     let mut root_vec = Vec::new();
     for root in root_visit.iter() {
@@ -515,7 +515,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
 }
 
 pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
     info!("{:4} {:<70} {:>10}", "Type", "Path", "Size",);
     for root in roots(&config, &secrets, &client, Some(root))?.iter() {
         let root = root?;
@@ -555,7 +555,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
     mut filter_root: Filter,
     mut handle_entry: Handler,
 ) -> Result<(bool, bool), Error> {
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
     let mut root_found = false;
     let mut ok = true;
     let x = roots(&config, &secrets, &client, only_root)?;
@@ -608,7 +608,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
 }
 
 pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool, Error> {
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
 
     let mut entries: Vec<Ent> = Vec::new();
 
@@ -668,7 +668,7 @@ pub fn run_restore(
         None
     };
 
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
 
     for ent in entries {
         if let Err(e) = recover_entry(
@@ -727,7 +727,7 @@ pub fn run_cat(
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
 
-    let mut client = reqwest::Client::new();
+    let mut client = reqwest::blocking::Client::new();
 
     for chunk in ent.chunks.iter() {
         let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
@@ -746,7 +746,7 @@ pub fn run_prune(
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
 
     let mut used: HashSet<String> = HashSet::new();
 

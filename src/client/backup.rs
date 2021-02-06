@@ -32,7 +32,7 @@ struct DirEnt {
 struct State<'a> {
     secrets: Secrets,
     config: Config,
-    client: reqwest::Client,
+    client: reqwest::blocking::Client,
     scan: bool,
     transfer_bytes: u64,
     progress: Option<ProgressBar<std::io::Stdout>>,
@@ -124,7 +124,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
                 .client
                 .put(&url[..])
                 .basic_auth(&state.config.user, Some(&state.config.password))
-                .body(reqwest::Body::from(crypted.clone()))
+                .body(reqwest::blocking::Body::from(crypted.clone()))
                 .send()
         })?;
         match res.status() {
@@ -423,7 +423,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     let mut state = State {
         secrets,
         config,
-        client: reqwest::Client::new(),
+        client: reqwest::blocking::Client::new(),
         scan: true,
         transfer_bytes: 0,
         progress: None,
