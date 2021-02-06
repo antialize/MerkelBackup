@@ -365,9 +365,9 @@ fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
 }
 
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
     let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
-    let mut res = check_response(&mut || {
+    let res = check_response(&mut || {
         client
             .get(&url[..])
             .basic_auth(&config.user, Some(&config.password))
@@ -399,7 +399,7 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
 }
 
 fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
     match visit::roots(&config, &secrets, &client, Some(root))?
         .iter()
         .next()
@@ -427,14 +427,13 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
 }
 
 fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
     loop {
         let start = std::time::Instant::now();
         visit::roots(&config, &secrets, &client, None)?;
         let duration = start.elapsed();
         println!("Ping {:?}", duration);
     }
-    Ok(())
 }
 
 fn main() -> Result<(), Error> {

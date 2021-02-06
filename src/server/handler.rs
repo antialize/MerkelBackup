@@ -766,7 +766,7 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
     ok_message(Some(ans))
 }
 
-async fn handle_get_mirror(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+async fn handle_get_mirror(_req: Request<Body>, state: Arc<State>) -> ResponseFuture {
     let mut bit: u8 = 1;
     let mut val: u8 = 0;
     let mut nid: i64 = 0;

@@ -158,9 +158,9 @@ impl From<lzma::LzmaError> for Error {
     }
 }
 
-pub fn retry<F>(f: &mut F) -> Result<reqwest::Response, reqwest::Error>
+pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error>
 where
-    F: FnMut() -> Result<reqwest::Response, reqwest::Error>,
+    F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
 {
     for sleep in [5, 20, 60, 120].iter() {
         match f() {
@@ -192,9 +192,9 @@ where
     f()
 }
 
-pub fn check_response<F>(f: &mut F) -> Result<reqwest::Response, Error>
+pub fn check_response<F>(f: &mut F) -> Result<reqwest::blocking::Response, Error>
 where
-    F: FnMut() -> Result<reqwest::Response, reqwest::Error>,
+    F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
 {
     let res = retry(f)?;
     match res.status() {

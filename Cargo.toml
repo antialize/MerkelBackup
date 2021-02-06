@@ -14,21 +14,21 @@ name = "mbackup"
 path = "src/client/main.rs"
 
 [dependencies]
-log = ""
-rusqlite = ""
-rust-crypto = ""
-rand = ""
-reqwest = "0.9"
-hex = ""
-clap = ""
-toml = ""
+log = "0.4"
+rusqlite = "0.24"
+rust-crypto = "0.2"
+rand = "0.8"
+reqwest = {version = "0.11", features=["blocking"]}
+hex = "0.4"
+clap = "2.33"
+toml = "0.5"
 serde = { version = "1.0", features = ["derive"] }
-chrono = ""
-base64 = ""
-pbr = ""
-nix = ""
-libc = ""
-rust-lzma = ""
-itertools = ""
-hyper = "0.13.0"
-tokio = {version="0.2", features = ["rt-threaded", "macros"]}
+chrono = "0.4"
+base64 = "0.13"
+pbr = "1.0"
+nix = "0.16"
+libc = "0.2"
+rust-lzma = "0.5"
+itertools = "0.10"
+hyper = {version="0.14.0", features =["http1", "runtime", "server"] }
+tokio = {version="1.1", features = ["rt-multi-thread", "macros"]}
