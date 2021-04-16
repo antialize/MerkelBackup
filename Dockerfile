@@ -14,6 +14,13 @@ COPY src/ src/
 RUN CARGO_TARGET_DIR=target cargo install --offline --root /usr --path .
 
 FROM rust
+ARG GIT_COMMIT
+ARG GIT_COMMIT_FULL
+ARG GIT_BRANCH
+ARG BUILD_USER
+ARG BUILD_HOST
 COPY --from=builder /usr/bin/mbackupd /usr/bin/mbackupd
 COPY --from=builder /usr/bin/mbackup /usr/bin/mbackup
+ENV GIT_COMMIT=$GIT_COMMIT GIT_COMMIT_FULL=$GIT_COMMIT_FULL GIT_BRANCH=$GIT_BRANCH BUILD_USER=$BUILD_USER BUILD_HOST=$BUILD_HOST
+LABEL GIT_COMMIT=$GIT_COMMIT GIT_COMMIT_FULL=$GIT_COMMIT_FULL GIT_BRANCH=$GIT_BRANCH BUILD_USER=$BUILD_USER BUILD_HOST=$BUILD_HOST
 CMD ["sh", "-c", "echo Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N; while sleep 100000; do  : ; done"]
