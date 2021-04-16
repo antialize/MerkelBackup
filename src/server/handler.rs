@@ -725,25 +725,49 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
 
     write!(ans, "# TYPE merkelbackup_rows_count gauge\n",).unwrap();
 
-    for table in ["roots", "chunks", "deletes"].iter() {
-        let cnt: i64 = tryfut!(
-            state.conn.lock().unwrap().query_row(
-                format!("SELECT COUNT(*) FROM {}", table).as_str(),
-                NO_PARAMS,
-                |row| row.get(0),
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Select failed"
-        );
+    // Note that SELECT COUNT(...) always does a full table scan in SQLite3
+    // so we use the max id instead, which is faster. See also:
+    // https://stackoverflow.com/q/8988915/sqlite-count-slow-on-big-tables
+    let roots_max_id: i64 = tryfut!(
+        state.conn.lock().unwrap().query_row(
+            "SELECT MAX(`id`) FROM roots LIMIT 1",
+            NO_PARAMS,
+            |row| row.get(0),
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Select failed"
+    );
+    let chunks_max_id: i64 = tryfut!(
+        state.conn.lock().unwrap().query_row(
+            "SELECT MAX(`id`) FROM chunks LIMIT 1",
+            NO_PARAMS,
+            |row| row.get(0),
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Select failed"
+    );
+    // `deletes` has no id column, but it's a tiny table,
+    // so use a full table scan with COUNT(*).
+    let deletes_count: i64 = tryfut!(
+        state.conn.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM deletes LIMIT 1",
+            NO_PARAMS,
+            |row| row.get(0),
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Select failed"
+    );
 
-        write!(
-            ans,
-            "merkelbackup_rows_count{{merkelbackup_table=\"{}\"}} {}\n",
-            table, cnt
-        )
-        .unwrap();
-    }
-    ans.push('\n');
+    write!(
+        ans,
+        "merkelbackup_rows_count{{merkelbackup_table=\"roots\"}} {}\n\
+        merkelbackup_rows_count{{merkelbackup_table=\"chunks\"}} {}\n\
+        merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {}\n\n",
+        roots_max_id,
+        chunks_max_id,
+        deletes_count,
+    )
+    .unwrap();
 
     for (name, time) in [
         ("start", &s.start_time),
