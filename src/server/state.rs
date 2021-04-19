@@ -1,4 +1,4 @@
-use rusqlite::{Connection, NO_PARAMS};
+use rusqlite::Connection;
 use std::sync::Mutex;
 
 use crate::config::Config;
@@ -63,7 +63,6 @@ pub fn setup_db(conf: &Config) -> Connection {
 
     trace!("Creating chunks table");
     // The chunks table contains metadata for all chunks
-    // and the content of small chunks
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chunks (
              id INTEGER PRIMARY KEY,
@@ -71,18 +70,28 @@ pub fn setup_db(conf: &Config) -> Connection {
              hash TEXT NOT NULL,
              size INTEGER NOT NULL,
              time INTEGER NOT NULL,
-             content BLOB
+             has_content BOOLEAN
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table");
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bucket_hash
         ON chunks (bucket,hash)",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table index");
+
+    // The chunk_content table contains data for small chunks
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS chunk_content (
+             chunk_id INTEGER PRIMARY KEY,
+             content BLOB
+             )",
+        [],
+    )
+    .expect("Unable to create cache table");
 
     trace!("Creating roots table");
     // The roots table records the root of the merkel tree of all backups
@@ -94,7 +103,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              time INTEGER NOT NULL,
              hash TEXT NOT NULL
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table");
 
@@ -104,7 +113,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              bucket TEXT NOT NULL UNIQUE,
              time INTEGER NOT NULL
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to deletes cache table");
 

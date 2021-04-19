@@ -12,7 +12,7 @@ use crypto::symmetriccipher::SynchronousStreamCipher;
 use lzma;
 use pbr::ProgressBar;
 use rand::Rng;
-use rusqlite::{params, Connection, Statement, NO_PARAMS};
+use rusqlite::{params, Connection, Statement};
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -358,7 +358,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     .parse()?;
 
     let oldest_remote: Option<i64> =
-        conn.query_row("SELECT min(time) FROM remote", NO_PARAMS, |row| row.get(0))?;
+        conn.query_row("SELECT min(time) FROM remote", [], |row| row.get(0))?;
 
     let should_update_remote = match oldest_remote {
         Some(t) => t < last_delete,
@@ -368,7 +368,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     if !should_update_remote {
         return Ok(());
     }
-    conn.execute("DELETE FROM remote", NO_PARAMS)?;
+    conn.execute("DELETE FROM remote", [])?;
     let url = format!(
         "{}/chunks/{}",
         &state.config.server,
@@ -409,7 +409,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             mtime INTEGER NOT NULL,
             chunks TEXT NOT NULL
         )",
-        NO_PARAMS,
+        [],
     )?;
 
     conn.execute(
@@ -417,7 +417,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             chunk TEXT NOT NULL UNIQUE,
             time INTEGER NOT NULL
         )",
-        NO_PARAMS,
+        [],
     )?;
 
     let mut state = State {

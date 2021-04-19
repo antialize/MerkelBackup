@@ -2,7 +2,7 @@ use clap::{App, Arg};
 use serde::Deserialize;
 
 /// Chunks smaller that this goes into the sqlite database instead of directly on disk
-pub const SMALL_SIZE: usize = 1024 * 128;
+pub const SMALL_SIZE: usize = 1024 * 32;
 
 /// The access level required, Put is the minimal, Delete is the maximal
 #[derive(Deserialize, PartialEq, Debug)]
