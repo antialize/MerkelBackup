@@ -176,8 +176,17 @@ async fn handle_put_chunk(
         let conn = state.conn.lock().unwrap();
         tryfut!(
             conn.execute(
-                "INSERT INTO chunks (bucket, hash, size, time, content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
-                params![&bucket, &chunk, v.len() as i64, &v],
+                "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
+                params![&bucket, &chunk, v.len() as i64],
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Insert failed",
+        );
+        let id = conn.last_insert_rowid();
+        tryfut!(
+            conn.execute(
+                "INSERT INTO chunk_content (chunk_id, content) VALUES (?, ?)",
+                params![id, &v],
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Insert failed",
@@ -215,7 +224,7 @@ async fn handle_put_chunk(
         );
         {
             let conn = state.conn.lock().unwrap();
-            tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time) VALUES (?, ?, ?, strftime('%s', 'now'))",
+            tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
                 params![&bucket, &chunk, len as i64]),
                 StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
         }
@@ -268,16 +277,29 @@ async fn handle_get_chunk(
     let (content, size) = {
         let conn = state.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, content, size FROM chunks WHERE bucket=? AND hash=?")
+            .prepare("SELECT id, has_content, size FROM chunks WHERE bucket=? AND hash=?")
             .unwrap();
 
         let mut rows = stmt.query(params![bucket, chunk]).unwrap();
         let (_id, content, size) = match rows.next().expect("Unable to read db row") {
             Some(row) => {
                 let id: i64 = row.get(0).unwrap();
-                let content: Option<Vec<u8>> = row.get(1).unwrap();
+                let has_content: bool = row.get(1).unwrap();
                 let size: i64 = row.get(2).unwrap();
-                (id, content, size)
+                if !head && has_content {
+                    let mut stmt = conn
+                        .prepare("SELECT content FROM chunk_content WHERE chunk_id = ?")
+                        .unwrap();
+                    let mut rows = stmt.query(params![id]).unwrap();
+                    match rows.next().expect("Unable to read db row") {
+                        Some(v) => (id, v.get(0).unwrap(), size),
+                        None => {
+                            return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
+                        }
+                    }
+                } else {
+                    (id, None, size)
+                }
             }
             None => {
                 if head {
@@ -339,19 +361,22 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
         let conn = state.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT hash, content IS NULL FROM chunks WHERE bucket=? AND hash IN (?{})",
+                "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
                 ", ?".repeat(chunks.len() - 1)
             ))
             .unwrap();
 
+        let mut internal_chunks = Vec::new();
         for row in stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .unwrap()
         {
-            let (chunk, external): (String, bool) = row.expect("Unable to read db row");
-            if external {
+            let (id, chunk, internal): (usize, String, bool) = row.expect("Unable to read db row");
+            if internal {
+                internal_chunks.push(id);
+            } else {
                 let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
                 tryfut!(
                     match std::fs::remove_file(path) {
@@ -362,6 +387,20 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
                     "Delete failed",
                 );
             }
+        }
+
+        if !internal_chunks.is_empty() {
+            tryfut!(
+                conn.execute(
+                    &format!(
+                        "DELETE FROM chunk_content WHERE chunk_id IN (?{})",
+                        ", ?".repeat(internal_chunks.len() - 1)
+                    ),
+                    rusqlite::params_from_iter(internal_chunks.iter()),
+                ),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Query failed",
+            );
         }
 
         let count = tryfut!(

@@ -63,7 +63,6 @@ pub fn setup_db(conf: &Config) -> Connection {
 
     trace!("Creating chunks table");
     // The chunks table contains metadata for all chunks
-    // and the content of small chunks
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chunks (
              id INTEGER PRIMARY KEY,
@@ -71,7 +70,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              hash TEXT NOT NULL,
              size INTEGER NOT NULL,
              time INTEGER NOT NULL,
-             content BLOB
+             has_content BOOLEAN
              )",
         [],
     )
@@ -83,6 +82,16 @@ pub fn setup_db(conf: &Config) -> Connection {
         [],
     )
     .expect("Unable to create cache table index");
+
+    // The chunk_content table contains data for small chunks
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS chunk_content (
+             chunk_id INTEGER PRIMARY KEY,
+             content BLOB
+             )",
+        [],
+    )
+    .expect("Unable to create cache table");
 
     trace!("Creating roots table");
     // The roots table records the root of the merkel tree of all backups
