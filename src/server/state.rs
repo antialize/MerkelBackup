@@ -1,4 +1,4 @@
-use rusqlite::{Connection, NO_PARAMS};
+use rusqlite::Connection;
 use std::sync::Mutex;
 
 use crate::config::Config;
@@ -73,14 +73,14 @@ pub fn setup_db(conf: &Config) -> Connection {
              time INTEGER NOT NULL,
              content BLOB
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table");
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bucket_hash
         ON chunks (bucket,hash)",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table index");
 
@@ -94,7 +94,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              time INTEGER NOT NULL,
              hash TEXT NOT NULL
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to create cache table");
 
@@ -104,7 +104,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              bucket TEXT NOT NULL UNIQUE,
              time INTEGER NOT NULL
              )",
-        NO_PARAMS,
+        [],
     )
     .expect("Unable to deletes cache table");
 

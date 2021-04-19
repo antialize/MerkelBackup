@@ -1,6 +1,6 @@
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use rusqlite::{params, NO_PARAMS};
+use rusqlite::params;
 use std::sync::Arc;
 
 use crate::config::{AccessType, SMALL_SIZE};
@@ -345,7 +345,9 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
             .unwrap();
 
         for row in stmt
-            .query_map(&params, |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .unwrap()
         {
             let (chunk, external): (String, bool) = row.expect("Unable to read db row");
@@ -368,7 +370,7 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
                     "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
                     ", ?".repeat(chunks.len() - 1)
                 ),
-                &params,
+                rusqlite::params_from_iter(params.iter()),
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Query failed",
@@ -729,31 +731,31 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
     // so we use the max id instead, which is faster. See also:
     // https://stackoverflow.com/q/8988915/sqlite-count-slow-on-big-tables
     let roots_max_id: i64 = tryfut!(
-        state.conn.lock().unwrap().query_row(
-            "SELECT MAX(`id`) FROM roots LIMIT 1",
-            NO_PARAMS,
-            |row| row.get(0),
-        ),
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| row.get(0),),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
     let chunks_max_id: i64 = tryfut!(
-        state.conn.lock().unwrap().query_row(
-            "SELECT MAX(`id`) FROM chunks LIMIT 1",
-            NO_PARAMS,
-            |row| row.get(0),
-        ),
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(`id`) FROM chunks LIMIT 1", [], |row| row.get(0),),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
     // `deletes` has no id column, but it's a tiny table,
     // so use a full table scan with COUNT(*).
     let deletes_count: i64 = tryfut!(
-        state.conn.lock().unwrap().query_row(
-            "SELECT COUNT(*) FROM deletes LIMIT 1",
-            NO_PARAMS,
-            |row| row.get(0),
-        ),
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM deletes LIMIT 1", [], |row| row.get(0),),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
@@ -763,9 +765,7 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
         "merkelbackup_rows_count{{merkelbackup_table=\"roots\"}} {}\n\
         merkelbackup_rows_count{{merkelbackup_table=\"chunks\"}} {}\n\
         merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {}\n\n",
-        roots_max_id,
-        chunks_max_id,
-        deletes_count,
+        roots_max_id, chunks_max_id, deletes_count,
     )
     .unwrap();
 
@@ -799,7 +799,7 @@ async fn handle_get_mirror(_req: Request<Body>, state: Arc<State>) -> ResponseFu
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
 
-    for row in stmt.query_map(NO_PARAMS, |row| Ok(row.get(0)?)).unwrap() {
+    for row in stmt.query_map([], |row| Ok(row.get(0)?)).unwrap() {
         let id: i64 = row.expect("Unable to read db row");
         while nid <= id {
             if bit == 127 {
