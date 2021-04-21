@@ -284,7 +284,9 @@ async fn handle_get_chunk(
         let (_id, content, size) = match rows.next().expect("Unable to read db row") {
             Some(row) => {
                 let id: i64 = row.get(0).unwrap();
-                let has_content: bool = row.get(1).unwrap();
+                // TODO(rav): Make has_content NOT NULL in the database
+                let has_content: Option<bool> = row.get(1).unwrap();
+                let has_content = has_content == Some(true);
                 let size: i64 = row.get(2).unwrap();
                 if !head && has_content {
                     let mut stmt = conn
@@ -373,8 +375,10 @@ async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) ->
             })
             .unwrap()
         {
-            let (id, chunk, internal): (usize, String, bool) = row.expect("Unable to read db row");
-            if internal {
+            // TODO(rav): Make has_content NOT NULL in the database
+            let (id, chunk, has_content): (usize, String, Option<bool>) = row.expect("Unable to read db row");
+            let has_content = has_content == Some(true);
+            if has_content {
                 internal_chunks.push(id);
             } else {
                 let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
