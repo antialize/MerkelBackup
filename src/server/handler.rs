@@ -3,8 +3,8 @@ use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
 use std::sync::Arc;
 
-use crate::config::{AccessType, SMALL_SIZE};
-use crate::error::{Error, ResponseFuture};
+use crate::config::{AccessType, Config, SMALL_SIZE};
+use crate::error::{Error, ResponseFuture, Result};
 use crate::state::State;
 use hyper::body::HttpBody;
 
@@ -95,7 +95,7 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
 }
 
 /// Validate that a string is a valid hex encoding of a 256bit hash
-fn check_hash(name: &str) -> std::result::Result<(), Error> {
+fn check_hash(name: &str) -> Result<()> {
     if name.len() != 64 {
         return Err(Error::Server("wrong hash length"));
     }
@@ -145,17 +145,13 @@ async fn handle_put_chunk(
     );
 
     // Check if the chunk is already there.
-    {
-        let conn = state.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id FROM chunks WHERE bucket=? AND hash=?")
-            .unwrap();
-
-        let mut rows = stmt.query(params![bucket, chunk]).unwrap();
-        if rows.next().expect("Unable to read db row").is_some() {
-            state.stat.put_chunk_already_there.inc();
-            return handle_error!(StatusCode::CONFLICT, "Already there", "");
-        }
+    if tryfut!(
+        do_check_chunk_exists(&mut state.conn.lock().unwrap(), &bucket, &chunk),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_check_chunk_exists failed"
+    ) {
+        state.stat.put_chunk_already_there.inc();
+        return handle_error!(StatusCode::CONFLICT, "Already there", "");
     }
 
     let mut v = Vec::new();
@@ -242,6 +238,16 @@ async fn handle_put_chunk(
     ok_message(None)
 }
 
+fn do_check_chunk_exists(
+    conn: &mut rusqlite::Connection,
+    bucket: &str,
+    chunk: &str,
+) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT id FROM chunks WHERE bucket=? AND hash=?")?;
+    let mut rows = stmt.query(params![bucket, chunk])?;
+    Ok(rows.next()?.is_some())
+}
+
 /// Get a chunk from the archive
 async fn handle_get_chunk(
     bucket: String,
@@ -274,45 +280,20 @@ async fn handle_get_chunk(
         "Bad chunk"
     );
 
-    let (content, size) = {
-        let conn = state.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, has_content, size FROM chunks WHERE bucket=? AND hash=?")
-            .unwrap();
-
-        let mut rows = stmt.query(params![bucket, chunk]).unwrap();
-        let (_id, content, size) = match rows.next().expect("Unable to read db row") {
-            Some(row) => {
-                let id: i64 = row.get(0).unwrap();
-                // TODO(rav): Make has_content NOT NULL in the database
-                let has_content: Option<bool> = row.get(1).unwrap();
-                let has_content = has_content == Some(true);
-                let size: i64 = row.get(2).unwrap();
-                if !head && has_content {
-                    let mut stmt = conn
-                        .prepare("SELECT content FROM chunk_content WHERE chunk_id = ?")
-                        .unwrap();
-                    let mut rows = stmt.query(params![id]).unwrap();
-                    match rows.next().expect("Unable to read db row") {
-                        Some(v) => (id, v.get(0).unwrap(), size),
-                        None => {
-                            return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
-                        }
-                    }
-                } else {
-                    (id, None, size)
-                }
+    let (content, size) = match tryfut!(
+        do_get_chunk(&mut state.conn.lock().unwrap(), &bucket, &chunk, head),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Database error"
+    ) {
+        Some(x) => x,
+        None => {
+            if head {
+                state.stat.get_chunk_head_missing.inc();
+            } else {
+                state.stat.get_chunk_missing.inc();
             }
-            None => {
-                if head {
-                    state.stat.get_chunk_head_missing.inc();
-                } else {
-                    state.stat.get_chunk_missing.inc();
-                }
-                return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
-            }
-        };
-        (content, size)
+            return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
+        }
     };
 
     if head {
@@ -350,90 +331,105 @@ async fn handle_get_chunk(
         .unwrap())
 }
 
-async fn do_delete_chunks(bucket: String, chunks: &[&str], state: Arc<State>) -> ResponseFuture {
+fn do_get_chunk(
+    conn: &mut rusqlite::Connection,
+    bucket: &str,
+    chunk: &str,
+    head: bool,
+) -> Result<Option<(Option<Vec<u8>>, i64)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, has_content, size FROM chunks WHERE bucket=? AND hash=?")?;
+
+    let mut rows = stmt.query(params![bucket, chunk])?;
+    let (_id, content, size) = match rows.next()? {
+        Some(row) => {
+            let id: i64 = row.get(0)?;
+            // TODO(rav): Make has_content NOT NULL in the database
+            let has_content: Option<bool> = row.get(1)?;
+            let has_content = has_content == Some(true);
+            let size: i64 = row.get(2)?;
+            if !head && has_content {
+                let mut stmt =
+                    conn.prepare("SELECT content FROM chunk_content WHERE chunk_id = ?")?;
+                let mut rows = stmt.query(params![id])?;
+                match rows.next()? {
+                    Some(v) => (id, v.get(0)?, size),
+                    None => {
+                        return Ok(None);
+                    }
+                }
+            } else {
+                (id, None, size)
+            }
+        }
+        None => {
+            return Ok(None);
+        }
+    };
+    Ok(Some((content, size)))
+}
+
+fn do_delete_chunks(
+    conn: &mut rusqlite::Connection,
+    bucket: String,
+    chunks: &[&str],
+    config: &Config,
+) -> Result<usize> {
     if chunks.is_empty() {
-        return ok_message(None);
+        return Ok(0);
     }
 
     let mut params: Vec<&str> = vec![&bucket];
     for chunk in chunks {
         params.push(chunk)
     }
-    let count = {
-        let conn = state.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
-                ", ?".repeat(chunks.len() - 1)
-            ))
-            .unwrap();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
+        ", ?".repeat(chunks.len() - 1)
+    ))?;
 
-        let mut internal_chunks = Vec::new();
-        for row in stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .unwrap()
-        {
-            // TODO(rav): Make has_content NOT NULL in the database
-            let (id, chunk, has_content): (usize, String, Option<bool>) = row.expect("Unable to read db row");
-            let has_content = has_content == Some(true);
-            if has_content {
-                internal_chunks.push(id);
-            } else {
-                let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
-                tryfut!(
-                    match std::fs::remove_file(path) {
-                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        v => v,
-                    },
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Delete failed",
-                );
+    let mut internal_chunks = Vec::new();
+    for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })? {
+        // TODO(rav): Make has_content NOT NULL in the database
+        let (id, chunk, has_content): (usize, String, Option<bool>) = row?;
+        let has_content = has_content == Some(true);
+        if has_content {
+            internal_chunks.push(id);
+        } else {
+            let path = chunk_path(&config.data_dir, &bucket, &chunk);
+            match std::fs::remove_file(path) {
+                Ok(_) => (),
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => return Err(Error::Server("Delete failed")),
             }
         }
-
-        if !internal_chunks.is_empty() {
-            tryfut!(
-                conn.execute(
-                    &format!(
-                        "DELETE FROM chunk_content WHERE chunk_id IN (?{})",
-                        ", ?".repeat(internal_chunks.len() - 1)
-                    ),
-                    rusqlite::params_from_iter(internal_chunks.iter()),
-                ),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Query failed",
-            );
-        }
-
-        let count = tryfut!(
-            conn.execute(
-                &format!(
-                    "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
-                    ", ?".repeat(chunks.len() - 1)
-                ),
-                rusqlite::params_from_iter(params.iter()),
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Query failed",
-        );
-
-        tryfut!(
-            conn.execute(
-                "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
-                params![bucket],
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Query failed",
-        );
-        count
-    };
-    state.stat.chunks_deleted.add(count);
-    if count != chunks.len() {
-        return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
-    ok_message(None)
+
+    if !internal_chunks.is_empty() {
+        conn.execute(
+            &format!(
+                "DELETE FROM chunk_content WHERE chunk_id IN (?{})",
+                ", ?".repeat(internal_chunks.len() - 1)
+            ),
+            rusqlite::params_from_iter(internal_chunks.iter()),
+        )?;
+    }
+
+    let count = conn.execute(
+        &format!(
+            "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
+            ", ?".repeat(chunks.len() - 1)
+        ),
+        rusqlite::params_from_iter(params.iter()),
+    )?;
+
+    conn.execute(
+        "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
+        params![bucket],
+    )?;
+    Ok(count)
 }
 
 async fn handle_delete_chunk(
@@ -460,7 +456,21 @@ async fn handle_delete_chunk(
     );
     let chu: &str = &chunk;
 
-    do_delete_chunks(bucket, std::slice::from_ref(&chu), state).await
+    let count = tryfut!(
+        do_delete_chunks(
+            &mut state.conn.lock().unwrap(),
+            bucket,
+            std::slice::from_ref(&chu),
+            &state.config
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_delete_chunks failed"
+    );
+    state.stat.chunks_deleted.add(count);
+    if count != 1 {
+        return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
+    }
+    ok_message(None)
 }
 
 async fn handle_delete_chunks(
@@ -496,7 +506,21 @@ async fn handle_delete_chunks(
     for chunk in chunks.iter() {
         tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad bucket");
     }
-    do_delete_chunks(bucket, &chunks, state).await
+    let count = tryfut!(
+        do_delete_chunks(
+            &mut state.conn.lock().unwrap(),
+            bucket,
+            &chunks,
+            &state.config
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_delete_chunks failed"
+    );
+    state.stat.chunks_deleted.add(count);
+    if count != chunks.len() {
+        return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
+    }
+    ok_message(None)
 }
 
 async fn handle_list_chunks(
@@ -527,47 +551,51 @@ async fn handle_list_chunks(
 
     state.stat.list_chunks_count.inc();
 
-    let ans = {
-        let mut ans = "".to_string();
-        let conn = state.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT hash, size, length(content) FROM chunks WHERE bucket=?")
-            .unwrap();
-
-        for row in stmt
-            .query_map(params![bucket], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .unwrap()
-        {
-            let (chunk, size, content_size): (String, i64, Option<i64>) = row.unwrap();
-            if full {
-                let content_size = match content_size {
-                    Some(v) => v,
-                    None => {
-                        let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
-                        match std::fs::metadata(path) {
-                            Ok(md) => md.len() as i64,
-                            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
-                            Err(e) => {
-                                return handle_error!(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Unable to access metadata",
-                                    e
-                                )
-                            }
-                        }
-                    }
-                };
-                ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
-            } else {
-                ans.push_str(&format!("{} {}\n", chunk, size));
-            }
-            state.stat.list_chunks_entries.inc();
-        }
-        ans
-    };
+    let ans = tryfut!(
+        do_list_chunks(
+            &mut state.conn.lock().unwrap(),
+            &state.config,
+            &bucket,
+            full
+        ),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_list_chunks failed"
+    );
+    state.stat.list_chunks_entries.inc();
     ok_message(Some(ans))
+}
+
+fn do_list_chunks(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    bucket: &str,
+    full: bool,
+) -> Result<String> {
+    let mut ans = "".to_string();
+    let mut stmt = conn.prepare("SELECT hash, size, length(content) FROM chunks WHERE bucket=?")?;
+
+    for row in stmt.query_map(params![bucket], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })? {
+        let (chunk, size, content_size): (String, i64, Option<i64>) = row?;
+        if full {
+            let content_size = match content_size {
+                Some(v) => v,
+                None => {
+                    let path = chunk_path(&config.data_dir, bucket, &chunk);
+                    match std::fs::metadata(path) {
+                        Ok(md) => md.len() as i64,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
+                        Err(_) => return Err(Error::Server("Unable to access metadata")),
+                    }
+                }
+            };
+            ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
+        } else {
+            ans.push_str(&format!("{} {}\n", chunk, size));
+        }
+    }
+    Ok(ans)
 }
 
 async fn handle_get_status(
@@ -587,17 +615,21 @@ async fn handle_get_status(
 
     state.stat.get_status_count.inc();
 
-    let conn = state.conn.lock().unwrap();
-    let mut stmt = conn
-        .prepare("SELECT time FROM deletes WHERE bucket=?")
-        .unwrap();
-
-    let mut rows = stmt.query(params![bucket]).unwrap();
-    let time: i64 = match rows.next().expect("Unable to read db row") {
-        Some(row) => row.get(0).expect("Unable to get number"),
-        None => 0,
-    };
+    let time = tryfut!(
+        do_get_status(&mut state.conn.lock().unwrap(), &bucket),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Database error",
+    );
     ok_message(Some(format!("{}", time)))
+}
+
+fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
+    let mut stmt = conn.prepare("SELECT time FROM deletes WHERE bucket=?")?;
+    let mut rows = stmt.query(params![bucket])?;
+    match rows.next()? {
+        Some(row) => Ok(row.get(0)?),
+        None => Ok(0),
+    }
 }
 
 async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
@@ -612,34 +644,32 @@ async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>)
     );
 
     state.stat.get_roots_count.inc();
+    ok_message(Some(tryfut!(
+        do_get_roots(&mut state.conn.lock().unwrap(), &bucket),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_get_roots failed"
+    )))
+}
 
-    let ans = {
-        let conn = state.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, host, time, hash FROM roots WHERE bucket=?")
-            .unwrap();
+fn do_get_roots(conn: &mut rusqlite::Connection, bucket: &str) -> Result<String> {
+    let mut stmt = conn.prepare("SELECT id, host, time, hash FROM roots WHERE bucket=?")?;
 
-        let mut ans = "".to_string();
-        for t in stmt
-            .query_map(params![bucket], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .unwrap()
-        {
-            let t = t.unwrap();
-            let id: i64 = t.0;
-            let host: String = t.1;
-            let time: i64 = t.2;
-            let hash: String = t.3;
-            if !ans.is_empty() {
-                ans.push('\0');
-                ans.push('\0');
-            }
-            ans.push_str(&format!("{}\0{}\0{}\0{}", id, host, time, hash));
+    let mut ans = "".to_string();
+    for t in stmt.query_map(params![bucket], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })? {
+        let t = t?;
+        let id: i64 = t.0;
+        let host: String = t.1;
+        let time: i64 = t.2;
+        let hash: String = t.3;
+        if !ans.is_empty() {
+            ans.push('\0');
+            ans.push('\0');
         }
-        ans
-    };
-    ok_message(Some(ans))
+        ans.push_str(&format!("{}\0{}\0{}\0{}", id, host, time, hash));
+    }
+    Ok(ans)
 }
 
 async fn handle_put_root(
