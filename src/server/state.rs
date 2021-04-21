@@ -70,7 +70,7 @@ pub fn setup_db(conf: &Config) -> Connection {
              hash TEXT NOT NULL,
              size INTEGER NOT NULL,
              time INTEGER NOT NULL,
-             has_content BOOLEAN
+             has_content BOOLEAN NOT NULL
              )",
         [],
     )
