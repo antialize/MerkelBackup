@@ -2,6 +2,7 @@ use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
 use std::sync::Arc;
+use std::fmt::Write;
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -528,12 +529,12 @@ async fn handle_list_chunks(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    let full = req.uri().query().map_or(false, |q| q.contains("validate"));
+    let validate = req.uri().query().map_or(false, |q| q.contains("validate"));
 
     if let Some(res) = check_auth(
         &req,
         state.clone(),
-        if full {
+        if validate {
             AccessType::Get
         } else {
             AccessType::Put
@@ -556,7 +557,7 @@ async fn handle_list_chunks(
             &mut state.conn.lock().unwrap(),
             &state.config,
             &bucket,
-            full
+            validate
         ),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_list_chunks failed"
@@ -569,30 +570,47 @@ fn do_list_chunks(
     conn: &mut rusqlite::Connection,
     config: &Config,
     bucket: &str,
-    full: bool,
+    validate: bool,
 ) -> Result<String> {
     let mut ans = "".to_string();
-    let mut stmt = conn.prepare("SELECT hash, size, length(content) FROM chunks WHERE bucket=?")?;
+    // TODO(rav): For some reason, it is taking much longer with a WHERE clause,
+    // than it takes to do a full scan and a manual filter.
+    // let mut stmt = conn.prepare("SELECT hash, size, has_content FROM chunks WHERE bucket=?")?;
+    // let rows = stmt.query_map(params![bucket], |row| {
+    //     Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
+    // })?;
+    let mut stmt = conn.prepare("SELECT hash, size, has_content, bucket FROM chunks")?;
+    let rows = stmt.query_map(params![], |row| {
+        let b: String = row.get(3)?;
+        if &b == bucket {
+            Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
+        } else {
+            Ok(None)
+        }
+    })?;
 
-    for row in stmt.query_map(params![bucket], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })? {
-        let (chunk, size, content_size): (String, i64, Option<i64>) = row?;
-        if full {
-            let content_size = match content_size {
-                Some(v) => v,
-                None => {
-                    let path = chunk_path(&config.data_dir, bucket, &chunk);
-                    match std::fs::metadata(path) {
-                        Ok(md) => md.len() as i64,
-                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
-                        Err(_) => return Err(Error::Server("Unable to access metadata")),
-                    }
+    for row in rows {
+        // TODO(rav): Make has_content NOT NULL in the database
+        let (chunk, size, has_content): (String, i64, Option<bool>) = match row? {
+            Some(row) => row,
+            None => continue,
+        };
+        let has_content = has_content == Some(true);
+        if validate {
+            let content_size = if has_content {
+                // TODO(rav): Join with content table
+                size
+            } else {
+                let path = chunk_path(&config.data_dir, bucket, &chunk);
+                match std::fs::metadata(path) {
+                    Ok(md) => md.len() as i64,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
+                    Err(_) => return Err(Error::Server("Unable to access metadata")),
                 }
             };
-            ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
+            write!(ans, "{} {} {}\n", chunk, size, content_size).unwrap();
         } else {
-            ans.push_str(&format!("{} {}\n", chunk, size));
+            write!(ans, "{} {}\n", chunk, size).unwrap();
         }
     }
     Ok(ans)
@@ -756,7 +774,6 @@ async fn handle_delete_root(
 }
 
 async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    use std::fmt::Write;
     if let Some(token) = &state.config.metrics_token {
         if req.uri().query() != Some(token.as_str()) {
             return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
