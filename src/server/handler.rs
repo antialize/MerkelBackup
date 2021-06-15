@@ -2,6 +2,7 @@ use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
 use std::sync::Arc;
+use std::fmt::Write;
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -592,9 +593,9 @@ fn do_list_chunks(
                     Err(_) => return Err(Error::Server("Unable to access metadata")),
                 }
             };
-            ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
+            write!(ans, "{} {} {}\n", chunk, size, content_size).unwrap();
         } else {
-            ans.push_str(&format!("{} {}\n", chunk, size));
+            write!(ans, "{} {}\n", chunk, size).unwrap();
         }
     }
     Ok(ans)
@@ -758,7 +759,6 @@ async fn handle_delete_root(
 }
 
 async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    use std::fmt::Write;
     if let Some(token) = &state.config.metrics_token {
         if req.uri().query() != Some(token.as_str()) {
             return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
