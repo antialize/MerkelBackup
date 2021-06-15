@@ -573,13 +573,28 @@ fn do_list_chunks(
     validate: bool,
 ) -> Result<String> {
     let mut ans = "".to_string();
-    let mut stmt = conn.prepare("SELECT hash, size, has_content FROM chunks WHERE bucket=?")?;
+    // TODO(rav): For some reason, it is taking much longer with a WHERE clause,
+    // than it takes to do a full scan and a manual filter.
+    // let mut stmt = conn.prepare("SELECT hash, size, has_content FROM chunks WHERE bucket=?")?;
+    // let rows = stmt.query_map(params![bucket], |row| {
+    //     Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
+    // })?;
+    let mut stmt = conn.prepare("SELECT hash, size, has_content, bucket FROM chunks")?;
+    let rows = stmt.query_map(params![], |row| {
+        let b: String = row.get(3)?;
+        if &b == bucket {
+            Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
+        } else {
+            Ok(None)
+        }
+    })?;
 
-    for row in stmt.query_map(params![bucket], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })? {
+    for row in rows {
         // TODO(rav): Make has_content NOT NULL in the database
-        let (chunk, size, has_content): (String, i64, Option<bool>) = row?;
+        let (chunk, size, has_content): (String, i64, Option<bool>) = match row? {
+            Some(row) => row,
+            None => continue,
+        };
         let has_content = has_content == Some(true);
         if validate {
             let content_size = if has_content {
