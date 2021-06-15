@@ -528,12 +528,12 @@ async fn handle_list_chunks(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    let full = req.uri().query().map_or(false, |q| q.contains("validate"));
+    let validate = req.uri().query().map_or(false, |q| q.contains("validate"));
 
     if let Some(res) = check_auth(
         &req,
         state.clone(),
-        if full {
+        if validate {
             AccessType::Get
         } else {
             AccessType::Put
@@ -556,7 +556,7 @@ async fn handle_list_chunks(
             &mut state.conn.lock().unwrap(),
             &state.config,
             &bucket,
-            full
+            validate
         ),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_list_chunks failed"
@@ -569,25 +569,27 @@ fn do_list_chunks(
     conn: &mut rusqlite::Connection,
     config: &Config,
     bucket: &str,
-    full: bool,
+    validate: bool,
 ) -> Result<String> {
     let mut ans = "".to_string();
-    let mut stmt = conn.prepare("SELECT hash, size, length(content) FROM chunks WHERE bucket=?")?;
+    let mut stmt = conn.prepare("SELECT hash, size, has_content FROM chunks WHERE bucket=?")?;
 
     for row in stmt.query_map(params![bucket], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })? {
-        let (chunk, size, content_size): (String, i64, Option<i64>) = row?;
-        if full {
-            let content_size = match content_size {
-                Some(v) => v,
-                None => {
-                    let path = chunk_path(&config.data_dir, bucket, &chunk);
-                    match std::fs::metadata(path) {
-                        Ok(md) => md.len() as i64,
-                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
-                        Err(_) => return Err(Error::Server("Unable to access metadata")),
-                    }
+        // TODO(rav): Make has_content NOT NULL in the database
+        let (chunk, size, has_content): (String, i64, Option<bool>) = row?;
+        let has_content = has_content == Some(true);
+        if validate {
+            let content_size = if has_content {
+                // TODO(rav): Join with content table
+                size
+            } else {
+                let path = chunk_path(&config.data_dir, bucket, &chunk);
+                match std::fs::metadata(path) {
+                    Ok(md) => md.len() as i64,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
+                    Err(_) => return Err(Error::Server("Unable to access metadata")),
                 }
             };
             ans.push_str(&format!("{} {} {}\n", chunk, size, content_size));
