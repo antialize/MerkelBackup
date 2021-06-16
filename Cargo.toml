@@ -13,6 +13,14 @@ path = "src/server/main.rs"
 name = "mbackup"
 path = "src/client/main.rs"
 
+[[bin]]
+name = "sbdiff"
+path = "src/sbdiff.rs"
+
+[[bin]]
+name = "sbpatch"
+path = "src/sbpatch.rs"
+
 [dependencies]
 log = "0.4"
 rusqlite = "0.25"
@@ -32,3 +40,5 @@ rust-lzma = "0.5"
 itertools = "0.10"
 hyper = {version="0.14.0", features =["http1", "runtime", "server"] }
 tokio = {version="1.5", features = ["rt-multi-thread", "macros"]}
+zstd = "0.9"
+blake3 = "0.3"
