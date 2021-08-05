@@ -9,7 +9,6 @@ use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
-use lzma;
 use pbr::ProgressBar;
 use rand::Rng;
 use rusqlite::{params, Connection, Statement};
@@ -98,7 +97,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     let mut hasher = Blake2b::new(256 / 8);
     hasher.input(&state.secrets.seed);
     hasher.input(content);
-    let hash = hasher.result_str().to_string();
+    let hash = hasher.result_str();
     let t0 = now.elapsed().as_millis();
     let hc = has_chunk(&hash, state, Some(content.len()))?;
     let t1 = now.elapsed().as_millis();
@@ -227,7 +226,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         }
 
         if !chunks.is_empty() {
-            chunks.push_str(&",");
+            chunks.push(',');
         }
         chunks.push_str(&push_chunk(&buffer[..used], state)?);
 

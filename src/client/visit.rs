@@ -3,12 +3,11 @@ use chrono::NaiveDateTime;
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
-use lzma;
 use pbr::ProgressBar;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -155,11 +154,12 @@ fn row_entry(row: &str) -> Result<Option<Ent>, Error> {
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recover_entry(
     pb: &mut Option<ProgressBar<std::io::Stdout>>,
     ent: &Ent,
     dry: bool,
-    dest: &PathBuf,
+    dest: &Path,
     preserve_owner: bool,
     client: &mut reqwest::blocking::Client,
     config: &Config,
@@ -201,7 +201,7 @@ fn recover_entry(
             if !dry {
                 let mut file = std::fs::File::create(&dpath)?;
                 for chunk in ent.chunks.iter() {
-                    let res = get_chunk(client, &config, &secrets, &chunk)?;
+                    let res = get_chunk(client, config, secrets, chunk)?;
                     file.write_all(&res)?;
                     if let Some(pb) = pb {
                         pb.add(res.len() as u64);
@@ -337,7 +337,7 @@ fn full_validate(
             continue;
         }
         for (idx, chunk) in ent.chunks.iter().enumerate() {
-            files.entry(&chunk).or_insert((idx, &ent.path));
+            files.entry(chunk).or_insert((idx, &ent.path));
         }
         bytes += ent.size;
     }
@@ -358,7 +358,7 @@ fn full_validate(
         if hash == &"empty" {
             continue;
         }
-        match get_chunk(client, &config, &secrets, &hash) {
+        match get_chunk(client, config, secrets, hash) {
             Err(e) => {
                 bad_files += 1;
                 error!(
@@ -426,7 +426,7 @@ fn partial_validate(
         }
         let mut ent_size: i64 = 0;
         for chunk in &ent.chunks {
-            let chunk: &str = &chunk;
+            let chunk: &str = chunk;
             if chunk == "empty" {
                 continue;
             }
@@ -558,7 +558,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
     let mut client = reqwest::blocking::Client::new();
     let mut root_found = false;
     let mut ok = true;
-    let x = roots(&config, &secrets, &client, only_root)?;
+    let x = roots(config, secrets, &client, only_root)?;
     for root in x.iter() {
         let root = root?;
         root_found = true;
@@ -571,7 +571,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
             NaiveDateTime::from_timestamp(root.time, 0)
         );
 
-        let v = match get_root(&mut client, &config, &secrets, root.hash) {
+        let v = match get_root(&mut client, config, secrets, root.hash) {
             Err(e) => {
                 error!("Bad root {}: {:?}", root.hash.to_string(), e);
                 ok = false;
@@ -702,7 +702,7 @@ pub fn run_cat(
         Some(root.as_ref()),
         |_| Ok(true),
         |ent| {
-            if &ent.path == &path {
+            if ent.path == path {
                 entries.push(ent);
             }
         },
@@ -730,7 +730,7 @@ pub fn run_cat(
     let mut client = reqwest::blocking::Client::new();
 
     for chunk in ent.chunks.iter() {
-        let res = get_chunk(&mut client, &config, &secrets, &chunk)?;
+        let res = get_chunk(&mut client, &config, &secrets, chunk)?;
         handle.write_all(&res)?;
     }
     Ok(ok)
@@ -865,7 +865,7 @@ pub fn run_prune(
         }) {
             Ok(_) => (),
             Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => (),
-            Err(e) => Err(e)?,
+            Err(e) => return Err(e),
         };
 
         if let Some(pb) = &mut pb {

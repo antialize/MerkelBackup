@@ -1,7 +1,6 @@
 extern crate serde;
 use serde::Deserialize;
 extern crate crypto;
-use lzma;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EType {
@@ -101,7 +100,7 @@ pub enum Error {
     Msg(&'static str),
     Toml(toml::de::Error),
     Nix(nix::Error),
-    LZMA(lzma::LzmaError),
+    Lzma(lzma::LzmaError),
 }
 
 impl From<rusqlite::Error> for Error {
@@ -154,7 +153,7 @@ impl From<nix::Error> for Error {
 
 impl From<lzma::LzmaError> for Error {
     fn from(error: lzma::LzmaError) -> Self {
-        Error::LZMA(error)
+        Error::Lzma(error)
     }
 }
 
@@ -165,15 +164,15 @@ where
     for sleep in [5, 20, 60, 120].iter() {
         match f() {
             Ok(res) => {
-                if match res.status() {
-                    reqwest::StatusCode::REQUEST_TIMEOUT => false,
-                    reqwest::StatusCode::TOO_MANY_REQUESTS => false,
-                    reqwest::StatusCode::INTERNAL_SERVER_ERROR => false,
-                    reqwest::StatusCode::BAD_GATEWAY => false,
-                    reqwest::StatusCode::SERVICE_UNAVAILABLE => false,
-                    reqwest::StatusCode::GATEWAY_TIMEOUT => false,
-                    _ => true,
-                } {
+                if !matches!(
+                    res.status(),
+                    reqwest::StatusCode::REQUEST_TIMEOUT
+                        | reqwest::StatusCode::TOO_MANY_REQUESTS
+                        | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                        | reqwest::StatusCode::BAD_GATEWAY
+                        | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        | reqwest::StatusCode::GATEWAY_TIMEOUT
+                ) {
                     return Ok(res);
                 } else {
                     warn!("Request failed, retrying {}", res.status());

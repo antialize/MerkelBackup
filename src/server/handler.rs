@@ -1,8 +1,8 @@
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
-use std::sync::Arc;
 use std::fmt::Write;
+use std::sync::Arc;
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -582,7 +582,7 @@ fn do_list_chunks(
     let mut stmt = conn.prepare("SELECT hash, size, has_content, bucket FROM chunks")?;
     let rows = stmt.query_map(params![], |row| {
         let b: String = row.get(3)?;
-        if &b == bucket {
+        if b == bucket {
             Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
         } else {
             Ok(None)
@@ -608,9 +608,9 @@ fn do_list_chunks(
                     Err(_) => return Err(Error::Server("Unable to access metadata")),
                 }
             };
-            write!(ans, "{} {} {}\n", chunk, size, content_size).unwrap();
+            writeln!(ans, "{} {} {}", chunk, size, content_size).unwrap();
         } else {
-            write!(ans, "{} {}\n", chunk, size).unwrap();
+            writeln!(ans, "{} {}", chunk, size).unwrap();
         }
     }
     Ok(ans)
@@ -805,9 +805,9 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
     ]
     .iter()
     {
-        write!(
+        writeln!(
             ans,
-            "# TYPE merkelbackup_{} counter\nmerkelbackup_{} {}\n\n",
+            "# TYPE merkelbackup_{} counter\nmerkelbackup_{} {}\n",
             name,
             name,
             counter.read()
@@ -815,7 +815,7 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
         .unwrap();
     }
 
-    write!(ans, "# TYPE merkelbackup_rows_count gauge\n",).unwrap();
+    writeln!(ans, "# TYPE merkelbackup_rows_count gauge",).unwrap();
 
     // Note that SELECT COUNT(...) always does a full table scan in SQLite3
     // so we use the max id instead, which is faster. See also:
@@ -889,7 +889,7 @@ async fn handle_get_mirror(_req: Request<Body>, state: Arc<State>) -> ResponseFu
     let conn = state.conn.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
 
-    for row in stmt.query_map([], |row| Ok(row.get(0)?)).unwrap() {
+    for row in stmt.query_map([], |row| row.get(0)).unwrap() {
         let id: i64 = row.expect("Unable to read db row");
         while nid <= id {
             if bit == 127 {

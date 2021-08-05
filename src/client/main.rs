@@ -28,7 +28,7 @@ impl log::Log for Logger {
 
     fn log(&self, record: &log::Record) {
         let level_string = record.level().to_string();
-        let target = if record.target().len() > 0 {
+        let target = if !record.target().is_empty() {
             record.target()
         } else {
             record.module_path().unwrap_or_default()
@@ -77,7 +77,7 @@ fn derive_secrets(password: &str) -> Secrets {
             o2.copy_from_slice(&data[prev * W + X..prev * W + 2 * X]);
             let o2 = usize::from_ne_bytes(o2) & (ITEMS - 1);
             hasher.reset();
-            hasher.input(&password.as_bytes());
+            hasher.input(password.as_bytes());
             hasher.input(&data[prev * W..(prev + 1) * W]);
             hasher.input(&data[o1 * W..(o1 + 1) * W]);
             hasher.input(&data[o2 * W..(o2 + 1) * W]);
@@ -486,10 +486,10 @@ fn main() -> Result<(), Error> {
         } else if let Some(m) = matches.subcommand_matches("roots") {
             list_roots(m.value_of("hostname"), config, secrets)?;
             true
-        } else if let Some(_) = matches.subcommand_matches("du") {
+        } else if matches.subcommand_matches("du").is_some() {
             visit::disk_usage(config, secrets)?;
             true
-        } else if let Some(_) = matches.subcommand_matches("ping") {
+        } else if matches.subcommand_matches("ping").is_some() {
             ping(config, secrets)?;
             true
         } else if let Some(m) = matches.subcommand_matches("ls") {
