@@ -13,6 +13,10 @@ path = "src/server/main.rs"
 name = "mbackup"
 path = "src/client/main.rs"
 
+[[bin]]
+name = "dummy_server"
+path = "src/dummy_server.rs"
+
 [dependencies]
 log = "0.4"
 rusqlite = "0.27"
@@ -32,3 +36,4 @@ rust-lzma = "0.5"
 itertools = "0.10"
 hyper = {version="0.14", features =["http1", "runtime", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
+sd-notify = "0.4"

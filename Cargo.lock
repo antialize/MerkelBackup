@@ -537,6 +537,7 @@ dependencies = [
  "rusqlite",
  "rust-crypto",
  "rust-lzma",
+ "sd-notify",
  "serde",
  "tokio",
  "toml",
@@ -964,6 +965,12 @@ dependencies = [
  "lazy_static",
  "windows-sys",
 ]
+
+[[package]]
+name = "sd-notify"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fde85c94a50dc789df8ca7b39f6b8b1eaa6cd320cc729e9ce1e1e1104292719"
 
 [[package]]
 name = "security-framework"

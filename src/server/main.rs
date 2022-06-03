@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server = Server::bind(&addr).serve(service);
     info!("Server listening on {}", &bind);
     info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
+    sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).unwrap();
     server.await?;
 
     Ok(())
