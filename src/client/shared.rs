@@ -1,4 +1,5 @@
 extern crate serde;
+use log::{debug, warn};
 use serde::Deserialize;
 extern crate crypto;
 
@@ -34,9 +35,9 @@ impl std::fmt::Display for EType {
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
-#[serde(remote = "log::LevelFilter")]
-pub enum LevelFilterDef {
+/// The log level as defined in the config file
+#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug, Eq, Ord)]
+pub enum Level {
     Off,
     Error,
     Warn,
@@ -45,11 +46,31 @@ pub enum LevelFilterDef {
     Trace,
 }
 
+impl PartialOrd for Level {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let a: log::LevelFilter = (*self).into();
+        let b: log::LevelFilter = (*other).into();
+        a.partial_cmp(&b)
+    }
+}
+
+impl Into<log::LevelFilter> for Level {
+    fn into(self) -> log::LevelFilter {
+        match self {
+            Level::Off => log::LevelFilter::Off,
+            Level::Error => log::LevelFilter::Error,
+            Level::Warn => log::LevelFilter::Warn,
+            Level::Info => log::LevelFilter::Info,
+            Level::Debug => log::LevelFilter::Debug,
+            Level::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[serde(with = "LevelFilterDef")]
-    pub verbosity: log::LevelFilter,
+    pub verbosity: Level,
     pub backup_dirs: Vec<String>,
     pub user: String,
     pub password: String,
@@ -64,7 +85,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            verbosity: log::LevelFilter::Info,
+            verbosity: Level::Info,
             backup_dirs: Vec::new(),
             user: "".to_string(),
             password: "".to_string(),
@@ -93,6 +114,7 @@ pub enum Error {
     HttpStatus(reqwest::StatusCode),
     BadPath(std::path::PathBuf),
     Io(std::io::Error),
+
     ParseInt(std::num::ParseIntError),
     InvalidHash(),
     Utf8(std::string::FromUtf8Error),

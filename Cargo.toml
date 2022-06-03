@@ -1,5 +1,5 @@
 [package]
-edition = "2018"
+edition = "2021"
 
 name = "mbackup"
 version = "0.1.0"
@@ -15,18 +15,18 @@ path = "src/client/main.rs"
 
 [dependencies]
 log = "0.4"
-rusqlite = "0.25"
+rusqlite = "0.27"
 rust-crypto = "0.2"
 rand = "0.8"
 reqwest = {version = "0.11", features=["blocking"]}
 hex = "0.4"
-clap = "2"
+clap = {version = "3", features = ["derive"] }
 toml = "0.5"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 base64 = "0.13"
 pbr = "1.0"
-nix = "0.22"
+nix = "0.24"
 libc = "0.2"
 rust-lzma = "0.5"
 itertools = "0.10"

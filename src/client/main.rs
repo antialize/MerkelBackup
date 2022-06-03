@@ -3,22 +3,24 @@ extern crate clap;
 extern crate crypto;
 extern crate hex;
 extern crate libc;
+extern crate log;
 extern crate nix;
 extern crate pbr;
 extern crate rand;
 extern crate reqwest;
 extern crate rusqlite;
 extern crate serde;
-#[macro_use]
-extern crate log;
-use clap::{App, Arg, ArgMatches, SubCommand};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 mod backup;
 mod shared;
 mod visit;
 use chrono::NaiveDateTime;
-use shared::{check_response, Config, Error, Secrets};
+use log::{debug, error};
+use shared::{check_response, Config, Error, Level, Secrets};
 
 struct Logger {}
 impl log::Log for Logger {
@@ -92,276 +94,219 @@ fn derive_secrets(password: &str) -> Secrets {
     secrets
 }
 
-fn parse_config() -> Result<(Config, ArgMatches<'static>), Error> {
-    let matches = App::new("mbackup client")
-        .version("0.1")
-        .about("A client for mbackup")
-        .author("Jakob Truelsen <jakob@scalgo.com>")
-        .arg(
-            Arg::with_name("verbosity")
-                .short("v")
-                .long("verbosity")
-                .takes_value(true)
-                .possible_values(&["none", "error", "warn", "info", "debug", "trace"])
-                .help("Sets the level of verbosity"),
-        )
-        .arg(
-            Arg::with_name("user")
-                .short("u")
-                .long("user")
-                .takes_value(true)
-                .help("The user to connect as"),
-        )
-        .arg(
-            Arg::with_name("password")
-                .short("p")
-                .long("password")
-                .takes_value(true)
-                .help("The password to connect with"),
-        )
-        .arg(
-            Arg::with_name("encryption_key")
-                .short("k")
-                .long("key")
-                .takes_value(true)
-                .help("The key to use when encrypting data"),
-        )
-        .arg(
-            Arg::with_name("server")
-                .short("s")
-                .long("server")
-                .takes_value(true)
-                .help("The remote server to connect to"),
-        )
-        .arg(
-            Arg::with_name("config")
-                .long("config")
-                .short("c")
-                .takes_value(true)
-                .help("Path to config file"),
-        )
-        .subcommand(
-            SubCommand::with_name("backup")
-                .about("perform a backup")
-                .arg(
-                    Arg::with_name("recheck")
-                        .long("recheck")
-                        .help("Recheck all the hashes"),
-                )
-                .arg(
-                    Arg::with_name("cache_db")
-                        .long("cache-db")
-                        .takes_value(true)
-                        .help("The path to the hash cache db"),
-                )
-                .arg(
-                    Arg::with_name("hostname")
-                        .long("hostname")
-                        .takes_value(true)
-                        .help("Hostname to back up as"),
-                )
-                .arg(
-                    Arg::with_name("dir")
-                        .long("dir")
-                        .takes_value(true)
-                        .multiple(true)
-                        .help("Directories to backup"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("prune")
-                .arg(
-                    Arg::with_name("dry")
-                        .long("dry")
-                        .help("Don't actually remove anything"),
-                )
-                .arg(
-                    Arg::with_name("age")
-                        .long("age")
-                        .help("Remove roots more than age dayes old")
-                        .takes_value(true),
-                )
-                .about("Remove old roots, and then perform garbage collection"),
-        )
-        .subcommand(
-            SubCommand::with_name("validate")
-                .arg(
-                    Arg::with_name("full")
-                        .long("full")
-                        .help("Also check that all files have the right content"),
-                )
-                .about("Validate all backed up content"),
-        )
-        .subcommand(
-            SubCommand::with_name("roots").about("list roots").arg(
-                Arg::with_name("hostname")
-                    .long("hostname")
-                    .takes_value(true)
-                    .help("Hostname to restore from"),
-            ),
-        )
-        .subcommand(SubCommand::with_name("du").about("list disk usage"))
-        .subcommand(SubCommand::with_name("ping").about("measure ping time"))
-        .subcommand(
-            SubCommand::with_name("ls").about("list files in root").arg(
-                Arg::with_name("root")
-                    .index(1)
-                    .required(true)
-                    .help("the root to restore"),
-            ),
-        )
-        .subcommand(
-            SubCommand::with_name("delete-root")
-                .about("delete a root")
-                .arg(
-                    Arg::with_name("root")
-                        .index(1)
-                        .required(true)
-                        .help("the root to restore"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("restore")
-                .about("restore backup files")
-                .arg(
-                    Arg::with_name("root")
-                        .index(1)
-                        .required(true)
-                        .help("the root to restore"),
-                )
-                .arg(
-                    Arg::with_name("pattern")
-                        .long("pattern")
-                        .short("p")
-                        .required(true)
-                        .default_value("")
-                        .help("pattern of files to restore"),
-                )
-                .arg(
-                    Arg::with_name("dest")
-                        .long("dest")
-                        .short("d")
-                        .takes_value(true)
-                        .default_value("/")
-                        .help("Where to store the restored files"),
-                )
-                .arg(
-                    Arg::with_name("preserve_owner")
-                        .long("preserve_owner")
-                        .help("Chown restored objects"),
-                )
-                .arg(
-                    Arg::with_name("dry")
-                        .long("dry")
-                        .help("Don't actually restore anything"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("cat")
-                .about("Dump file to stdout")
-                .arg(
-                    Arg::with_name("root")
-                        .index(1)
-                        .required(true)
-                        .help("the root to restore"),
-                )
-                .arg(
-                    Arg::with_name("path")
-                        .index(2)
-                        .required(true)
-                        .help("path of file to restore"),
-                ),
-        )
-        .get_matches();
+#[derive(Parser)]
+#[clap(author, version, about="A client for mbackup", long_about = None)]
+struct Args {
+    /// Sets the level of verbosity
+    #[clap(arg_enum, short, long)]
+    verbosity: Option<Level>, //Option<log::LevelFilter>,
 
-    let mut config: Config = match matches.value_of("config") {
+    /// The user to connect as
+    #[clap(short, long)]
+    user: Option<String>,
+
+    /// The password to connect with
+    #[clap(short, long)]
+    password: Option<String>,
+
+    /// The key to use when encrypting data
+    #[clap(short = 'k', long = "key")]
+    encryption_key: Option<String>,
+
+    /// The remote server to connect to
+    #[clap(short, long)]
+    server: Option<String>,
+
+    /// Path to config file
+    #[clap(short, long)]
+    config: Option<std::path::PathBuf>,
+
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Parser)]
+struct BackupCommand {
+    // Recheck all the hashes
+    #[clap(long)]
+    recheck: Option<bool>,
+
+    //The path to the hash cache db
+    #[clap(long = "cache-db")]
+    cache_db: Option<String>,
+
+    //Hostname to back up as
+    #[clap(long)]
+    hostname: Option<String>,
+
+    /// Path to config file
+    #[clap(short, long)]
+    dir: Vec<String>,
+}
+
+#[derive(Parser)]
+struct PruneCommand {
+    // Don't actually remove anything
+    #[clap(long)]
+    dry: bool,
+
+    // Prune all rots older than this
+    #[clap(long)]
+    age: Option<u32>,
+}
+
+#[derive(Parser)]
+struct ValidateCommand {
+    // Also check that all files have the right content
+    #[clap(long)]
+    full: bool,
+}
+
+#[derive(Parser)]
+struct RootsCommand {
+    // Hostname to list roots from
+    #[clap(long)]
+    hostname: Option<String>,
+}
+
+#[derive(Parser)]
+struct LsCommand {
+    /// The root to list
+    root: String,
+}
+
+#[derive(Parser)]
+struct DeleteRootCommand {
+    /// The root to delete
+    root: String,
+}
+
+#[derive(Parser)]
+pub struct RestoreCommand {
+    /// The root to restore
+    pub root: String,
+
+    /// Pattern of files to restore
+    #[clap(short, long)]
+    pub pattern: PathBuf,
+
+    /// Where to store the restored files
+    #[clap(short, long, default_value = "/")]
+    pub dest: PathBuf,
+
+    /// Chown restored objects
+    #[clap(long)]
+    pub preserve_owner: bool,
+
+    /// Don't actually restore anything
+    #[clap(long)]
+    pub dry: bool,
+}
+
+#[derive(Parser)]
+struct CatCommand {
+    // The root to delete
+    root: String,
+
+    // Path of file to restore
+    path: std::path::PathBuf,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Perform a backup
+    Backup(BackupCommand),
+    /// Remove old roots, and then perform garbage collection
+    Prune(PruneCommand),
+    /// Validate all backed up content
+    Validate(ValidateCommand),
+    /// List roots
+    Roots(RootsCommand),
+    /// List disk usage
+    Du,
+    /// Measure ping time
+    Ping,
+    /// List files in root
+    Ls(LsCommand),
+    /// Delete a root
+    DeleteRoot(DeleteRootCommand),
+    /// Delete a root
+    Restore(RestoreCommand),
+    /// Dump file to stdout
+    Cat(CatCommand),
+}
+
+fn parse_config() -> Result<(Config, Commands), Error> {
+    let args = Args::parse();
+
+    let mut config: Config = match args.config {
         Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
         None => Config {
             ..Default::default()
         },
     };
 
-    match matches.value_of("verbosity") {
-        Some("none") => config.verbosity = log::LevelFilter::Off,
-        Some("error") => config.verbosity = log::LevelFilter::Error,
-        Some("warn") => config.verbosity = log::LevelFilter::Warn,
-        Some("info") => config.verbosity = log::LevelFilter::Info,
-        Some("debug") => config.verbosity = log::LevelFilter::Debug,
-        Some("trace") => config.verbosity = log::LevelFilter::Trace,
-        Some(_) => return Err(Error::Msg("Unknown log level")),
-        None => (),
+    if let Some(v) = args.verbosity {
+        config.verbosity = v;
     }
 
-    if let Some(v) = matches.value_of("user") {
-        config.user = v.to_string();
+    if let Some(v) = args.user {
+        config.user = v;
     }
+
     if config.user.is_empty() {
         return Err(Error::Msg("No user specified"));
     }
 
-    if let Some(v) = matches.value_of("password") {
-        config.password = v.to_string();
+    if let Some(v) = args.password {
+        config.password = v;
     }
     if config.password.is_empty() {
         return Err(Error::Msg("No password specified"));
     }
 
-    if let Some(v) = matches.value_of("encryption_key") {
-        config.encryption_key = v.to_string();
+    if let Some(v) = args.encryption_key {
+        config.encryption_key = v;
     }
     if config.encryption_key.is_empty() {
         return Err(Error::Msg("No encryption key specified"));
     }
 
-    if let Some(v) = matches.value_of("server") {
-        config.server = v.to_string();
+    if let Some(v) = args.server {
+        config.server = v;
     }
     if config.server.is_empty() {
         return Err(Error::Msg("No servers pecified"));
     }
 
-    if let Some(m) = matches.subcommand_matches("backup") {
-        if m.is_present("recheck") {
-            config.recheck = true;
+    if let Commands::Backup(b) = &args.command {
+        if let Some(r) = b.recheck {
+            config.recheck = r;
         }
 
-        if let Some(v) = m.value_of("cache_db") {
+        if let Some(v) = &b.cache_db {
             config.cache_db = v.to_string();
         }
         if config.cache_db.is_empty() {
             return Err(Error::Msg("No cache_db specified"));
         }
 
-        if let Some(v) = m.value_of("hostname") {
+        if let Some(v) = &b.hostname {
             config.hostname = v.to_string();
         }
         if config.hostname.is_empty() {
             return Err(Error::Msg("No host name specified"));
         }
 
-        if let Some(v) = m.values_of("dir") {
-            config.backup_dirs = v.map(std::string::ToString::to_string).collect();
+        if !b.dir.is_empty() {
+            config.backup_dirs = b.dir.iter().map(std::string::ToString::to_string).collect();
         }
         if config.backup_dirs.is_empty() {
             return Err(Error::Msg("No backup dirs specified"));
         }
-    } else if let Some(m) = matches.subcommand_matches("prune") {
-        if let Some(v) = m.value_of("age") {
-            let _: u32 = v.parse()?;
-        }
-    } else if matches.subcommand_matches("roots").is_some()
-        || matches.subcommand_matches("validate").is_some()
-        || matches.subcommand_matches("restore").is_some()
-        || matches.subcommand_matches("cat").is_some()
-        || matches.subcommand_matches("delete-root").is_some()
-        || matches.subcommand_matches("du").is_some()
-        || matches.subcommand_matches("ping").is_some()
-        || matches.subcommand_matches("ls").is_some()
-    {
-    } else {
-        return Err(Error::Msg("No sub command specified"));
     }
-    Ok((config, matches))
+
+    Ok((config, args.command))
 }
 
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
@@ -438,65 +383,41 @@ fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
 
 fn main() -> Result<(), Error> {
     log::set_logger(&LOGGER).unwrap();
-    let (config, matches) = parse_config()?;
-    log::set_max_level(config.verbosity);
+    let (config, command) = parse_config()?;
+    log::set_max_level(config.verbosity.into());
     debug!("Config {:?}", config);
 
     debug!("Derive secret!!\n");
+
     let secrets = derive_secrets(&config.encryption_key);
-    let ok = {
-        if matches.subcommand_matches("backup").is_some() {
+    let ok = match command {
+        Commands::Backup(_) => {
             backup::run(config, secrets)?;
             true
-        } else if let Some(m) = matches.subcommand_matches("validate") {
-            visit::run_validate(config, secrets, m.is_present("full"))?
-        } else if let Some(m) = matches.subcommand_matches("prune") {
-            visit::run_prune(
-                config,
-                secrets,
-                m.is_present("dry"),
-                m.value_of("age").map(|f| f.parse().unwrap()),
-            )?
-        } else if let Some(m) = matches.subcommand_matches("restore") {
-            visit::run_restore(
-                config,
-                secrets,
-                m.value_of("root")
-                    .ok_or(Error::Msg("Missing root"))?
-                    .to_string(),
-                m.is_present("dry"),
-                std::path::PathBuf::from(m.value_of("dest").ok_or(Error::Msg("Missing dest"))?),
-                m.is_present("preserve_owner"),
-                std::path::PathBuf::from(
-                    m.value_of("pattern").ok_or(Error::Msg("Missing pattern"))?,
-                ),
-            )?
-        } else if let Some(m) = matches.subcommand_matches("cat") {
-            visit::run_cat(
-                config,
-                secrets,
-                m.value_of("root")
-                    .ok_or(Error::Msg("Missing root"))?
-                    .to_string(),
-                std::path::PathBuf::from(m.value_of("path").ok_or(Error::Msg("Missing path"))?),
-            )?
-        } else if let Some(m) = matches.subcommand_matches("delete-root") {
-            delete_root(m.value_of("root").unwrap(), config, secrets)?;
+        }
+        Commands::Validate(c) => visit::run_validate(config, secrets, c.full)?,
+        Commands::Prune(c) => visit::run_prune(config, secrets, c.dry, c.age)?,
+        Commands::Restore(c) => visit::run_restore(config, secrets, c)?,
+        Commands::Cat(c) => visit::run_cat(config, secrets, c.root, c.path)?,
+        Commands::DeleteRoot(c) => {
+            delete_root(&c.root, config, secrets)?;
             true
-        } else if let Some(m) = matches.subcommand_matches("roots") {
-            list_roots(m.value_of("hostname"), config, secrets)?;
+        }
+        Commands::Roots(c) => {
+            list_roots(c.hostname.as_deref(), config, secrets)?;
             true
-        } else if matches.subcommand_matches("du").is_some() {
+        }
+        Commands::Du => {
             visit::disk_usage(config, secrets)?;
             true
-        } else if matches.subcommand_matches("ping").is_some() {
+        }
+        Commands::Ping => {
             ping(config, secrets)?;
             true
-        } else if let Some(m) = matches.subcommand_matches("ls") {
-            visit::list_root(m.value_of("root").unwrap(), config, secrets)?;
+        }
+        Commands::Ls(c) => {
+            visit::list_root(&c.root, config, secrets)?;
             true
-        } else {
-            panic!("unknown subcommand");
         }
     };
     if !ok {

@@ -1,8 +1,10 @@
-use crate::shared::{check_response, Config, EType, Error, Secrets};
+use crate::shared::{check_response, Config, EType, Error, Level, Secrets};
+use crate::RestoreCommand;
 use chrono::NaiveDateTime;
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
+use log::{debug, error, info};
 use pbr::ProgressBar;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -342,7 +344,7 @@ fn full_validate(
         bytes += ent.size;
     }
 
-    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+    let mut pb = if config.verbosity >= Level::Info {
         let mut pb = ProgressBar::new(bytes);
         pb.set_units(pbr::Units::Bytes);
         pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
@@ -630,25 +632,17 @@ pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool
     Ok(ok)
 }
 
-pub fn run_restore(
-    config: Config,
-    secrets: Secrets,
-    root: String,
-    dry: bool,
-    dest: PathBuf,
-    preserve_owner: bool,
-    pattern: PathBuf,
-) -> Result<bool, Error> {
+pub fn run_restore(config: Config, secrets: Secrets, args: RestoreCommand) -> Result<bool, Error> {
     let mut entries: Vec<Ent> = Vec::new();
 
     let (root_found, ok) = find_entries(
         &config,
         &secrets,
-        Some(root.as_ref()),
+        Some(args.root.as_ref()),
         |_| Ok(true),
         |ent| {
-            if ent.path.starts_with(&pattern)
-                || (pattern.starts_with(&ent.path) && ent.etype == EType::Dir)
+            if ent.path.starts_with(&args.pattern)
+                || (args.pattern.starts_with(&ent.path) && ent.etype == EType::Dir)
             {
                 entries.push(ent);
             }
@@ -659,7 +653,7 @@ pub fn run_restore(
         return Err(Error::Msg("Root not found"));
     }
     let bytes = entries.iter().map(|e| e.size).sum();
-    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+    let mut pb = if config.verbosity >= Level::Info {
         let mut pb = ProgressBar::new(bytes);
         pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
         pb.set_units(pbr::Units::Bytes);
@@ -674,9 +668,9 @@ pub fn run_restore(
         if let Err(e) = recover_entry(
             &mut pb,
             &ent,
-            dry,
-            &dest,
-            preserve_owner,
+            args.dry,
+            &args.dest,
+            args.preserve_owner,
             &mut client,
             &config,
             &secrets,
@@ -827,7 +821,7 @@ pub fn run_prune(
         return Ok(ok);
     }
 
-    let mut pb = if config.verbosity >= log::LevelFilter::Info {
+    let mut pb = if config.verbosity >= Level::Info {
         let mut pb = ProgressBar::new(removed_size);
         pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
         pb.set_units(pbr::Units::Bytes);

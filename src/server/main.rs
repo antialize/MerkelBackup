@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     log::set_logger(&LOGGER).unwrap();
 
     let config = parse_config();
-    log::set_max_level(config.verbosity);
+    log::set_max_level(config.verbosity.into());
 
     debug!("Config {:?}", config);
     let conn = Mutex::new(setup_db(&config));

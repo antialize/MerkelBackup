@@ -1,4 +1,4 @@
-use clap::{App, Arg};
+use clap::Parser;
 use serde::Deserialize;
 
 /// Chunks smaller that this goes into the sqlite database instead of directly on disk
@@ -37,11 +37,8 @@ pub struct User {
 }
 
 /// The log level as defined in the config file
-///
-/// We need this duplication hack so we can get serde to deserialise it
-#[derive(Deserialize, PartialEq, Debug)]
-#[serde(remote = "log::LevelFilter")]
-pub enum LevelFilterDef {
+#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug)]
+pub enum Level {
     Off,
     Error,
     Warn,
@@ -50,12 +47,24 @@ pub enum LevelFilterDef {
     Trace,
 }
 
+impl Into<log::LevelFilter> for Level {
+    fn into(self) -> log::LevelFilter {
+        match self {
+            Level::Off => log::LevelFilter::Off,
+            Level::Error => log::LevelFilter::Error,
+            Level::Warn => log::LevelFilter::Warn,
+            Level::Info => log::LevelFilter::Info,
+            Level::Debug => log::LevelFilter::Debug,
+            Level::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
 /// The main configuration structure
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[serde(with = "LevelFilterDef")]
-    pub verbosity: log::LevelFilter,
+    pub verbosity: Level,
     pub bind: String,
     pub data_dir: String,
     pub users: Vec<User>,
@@ -66,7 +75,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            verbosity: log::LevelFilter::Info,
+            verbosity: Level::Info,
             bind: "0.0.0.0:3321".to_string(),
             data_dir: ".".to_string(),
             users: Vec::new(),
@@ -75,54 +84,41 @@ impl Default for Config {
     }
 }
 
-pub fn parse_config() -> Config {
-    let matches = App::new("mbackup server")
-        .version("0.1")
-        .about("A server for mbackup")
-        .author("Jakob Truelsen <jakob@scalgo.com>")
-        .arg(
-            Arg::with_name("verbosity")
-                .short("v")
-                .long("verbosity")
-                .takes_value(true)
-                .possible_values(&["none", "error", "warn", "info", "debug", "trace"])
-                .help("Sets the level of verbosity"),
-        )
-        .arg(
-            Arg::with_name("bind")
-                .short("b")
-                .long("bind")
-                .takes_value(true)
-                .help("The interface/port to bind to"),
-        )
-        .arg(
-            Arg::with_name("data_dir")
-                .long("data-dir")
-                .takes_value(true)
-                .help("Where do we store data"),
-        )
-        .arg(
-            Arg::with_name("config")
-                .long("config")
-                .short("c")
-                .takes_value(true)
-                .help("Path to config file"),
-        )
-        .get_matches();
+#[derive(Parser)]
+#[clap(author, version, about="A server for mbackup", long_about = None)]
+struct Args {
+    /// Sets the level of verbosity
+    #[clap(arg_enum, short, long)]
+    verbosity: Option<Level>, //Option<log::LevelFilter>,
 
-    let mut config: Config = match matches.value_of("config") {
+    /// The interface/port to bind to
+    #[clap(short, long)]
+    bind: Option<String>,
+
+    /// Where do we store data
+    #[clap(long = "data-dir")]
+    data_dir: Option<String>,
+
+    /// Path to config file
+    #[clap(short, long)]
+    config: Option<std::path::PathBuf>,
+}
+
+pub fn parse_config() -> Config {
+    let args = Args::parse();
+    let mut config: Config = match args.config {
         Some(path) => {
-            let data = match std::fs::read_to_string(path) {
+            let data = match std::fs::read_to_string(&path) {
                 Ok(data) => data,
                 Err(e) => {
-                    error!("Unable to open config file {}: {:?}", path, e);
+                    error!("Unable to open config file {:?}: {:?}", path, e);
                     std::process::exit(1)
                 }
             };
             match toml::from_str(&data) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    error!("Unable to parse config file {}: {:?}", path, e);
+                    error!("Unable to parse config file {:?}: {:?}", path, e);
                     std::process::exit(1)
                 }
             }
@@ -130,21 +126,14 @@ pub fn parse_config() -> Config {
         None => Default::default(),
     };
 
-    match matches.value_of("verbosity") {
-        Some("none") => config.verbosity = log::LevelFilter::Off,
-        Some("error") => config.verbosity = log::LevelFilter::Error,
-        Some("warn") => config.verbosity = log::LevelFilter::Warn,
-        Some("info") => config.verbosity = log::LevelFilter::Info,
-        Some("debug") => config.verbosity = log::LevelFilter::Debug,
-        Some("trace") => config.verbosity = log::LevelFilter::Trace,
-        Some(v) => panic!("Unknown log level {}", v),
-        None => (),
+    if let Some(verbosity) = args.verbosity {
+        config.verbosity = verbosity;
     }
 
-    if let Some(bind) = matches.value_of("bind") {
+    if let Some(bind) = args.bind {
         config.bind = bind.to_string();
     }
-    if let Some(dir) = matches.value_of("data_dir") {
+    if let Some(dir) = args.data_dir {
         config.data_dir = dir.to_string();
     }
 

@@ -5,10 +5,14 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::shared::Level;
 use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use crypto::symmetriccipher::SynchronousStreamCipher;
+use log::debug;
+use log::error;
+use log::info;
 use pbr::ProgressBar;
 use rand::Rng;
 use rusqlite::{params, Connection, Statement};
@@ -454,7 +458,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         backup_folder(path, &mut state)?;
     }
 
-    if state.config.verbosity >= log::LevelFilter::Info {
+    if state.config.verbosity >= Level::Info {
         state.progress = Some({
             let mut p = ProgressBar::new(state.transfer_bytes);
             p.set_max_refresh_rate(Some(Duration::from_millis(500)));
