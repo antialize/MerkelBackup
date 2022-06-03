@@ -23,4 +23,4 @@ COPY --from=builder /usr/bin/mbackupd /usr/bin/mbackupd
 COPY --from=builder /usr/bin/mbackup /usr/bin/mbackup
 ENV GIT_COMMIT=$GIT_COMMIT GIT_COMMIT_FULL=$GIT_COMMIT_FULL GIT_BRANCH=$GIT_BRANCH BUILD_USER=$BUILD_USER BUILD_HOST=$BUILD_HOST
 LABEL GIT_COMMIT=$GIT_COMMIT GIT_COMMIT_FULL=$GIT_COMMIT_FULL GIT_BRANCH=$GIT_BRANCH BUILD_USER=$BUILD_USER BUILD_HOST=$BUILD_HOST
-CMD ["sh", "-c", "echo Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N; while sleep 100000; do  : ; done"]
+CMD ["sh", "-c", "echo Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N; echo READY=1 | /usr/bin/nc -uU ${NOTIFY_SOCKET}; while sleep 100000; do  : ; done"]
