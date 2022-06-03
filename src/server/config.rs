@@ -47,9 +47,9 @@ pub enum Level {
     Trace,
 }
 
-impl Into<log::LevelFilter> for Level {
-    fn into(self) -> log::LevelFilter {
-        match self {
+impl From<Level> for log::LevelFilter {
+    fn from(l: Level) -> Self {
+        match l {
             Level::Off => log::LevelFilter::Off,
             Level::Error => log::LevelFilter::Error,
             Level::Warn => log::LevelFilter::Warn,
@@ -59,7 +59,6 @@ impl Into<log::LevelFilter> for Level {
         }
     }
 }
-
 /// The main configuration structure
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(default, deny_unknown_fields)]
@@ -131,10 +130,10 @@ pub fn parse_config() -> Config {
     }
 
     if let Some(bind) = args.bind {
-        config.bind = bind.to_string();
+        config.bind = bind;
     }
     if let Some(dir) = args.data_dir {
-        config.data_dir = dir.to_string();
+        config.data_dir = dir;
     }
 
     config

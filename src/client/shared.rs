@@ -36,7 +36,7 @@ impl std::fmt::Display for EType {
 }
 
 /// The log level as defined in the config file
-#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug, Eq, Ord)]
+#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug, Eq)]
 pub enum Level {
     Off,
     Error,
@@ -54,9 +54,15 @@ impl PartialOrd for Level {
     }
 }
 
-impl Into<log::LevelFilter> for Level {
-    fn into(self) -> log::LevelFilter {
-        match self {
+impl Ord for Level {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+impl From<Level> for log::LevelFilter {
+    fn from(l: Level) -> log::LevelFilter {
+        match l {
             Level::Off => log::LevelFilter::Off,
             Level::Error => log::LevelFilter::Error,
             Level::Warn => log::LevelFilter::Warn,

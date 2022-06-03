@@ -252,7 +252,7 @@ impl<'l> Iterator for RootsIter<'l> {
     type Item = Result<Root<'l>, Error>;
 
     fn next(&mut self) -> Option<Result<Root<'l>, Error>> {
-        while let Some(row) = self.rows.next() {
+        for row in self.rows.by_ref() {
             if row.is_empty() {
                 continue;
             }

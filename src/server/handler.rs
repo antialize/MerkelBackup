@@ -101,10 +101,10 @@ fn check_hash(name: &str) -> Result<()> {
         return Err(Error::Server("wrong hash length"));
     }
     for c in name.chars() {
-        if '0' <= c && c <= '9' {
+        if ('0'..='9').contains(&c) {
             continue;
         }
-        if 'a' <= c && c <= 'f' {
+        if ('a'..='f').contains(&c) {
             continue;
         }
         return Err(Error::Server("hash character not lowercase hex"));
