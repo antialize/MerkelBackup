@@ -36,7 +36,7 @@ impl std::fmt::Display for EType {
 }
 
 /// The log level as defined in the config file
-#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug, Eq)]
+#[derive(Deserialize, PartialEq, clap::ValueEnum, Clone, Copy, Debug, Eq)]
 pub enum Level {
     Off,
     Error,

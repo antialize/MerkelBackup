@@ -1,3 +1,4 @@
+use base64::Engine;
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
@@ -82,7 +83,8 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
     for user in state.config.users.iter() {
         if format!(
             "Basic {}",
-            base64::encode(&format!("{}:{}", user.name, user.password))
+            base64::engine::general_purpose::STANDARD
+                .encode(&format!("{}:{}", user.name, user.password))
         ) != auth
         {
             continue;

@@ -273,13 +273,12 @@ impl<'l> Iterator for RootsIter<'l> {
                 Err(e) => return Some(Err(e)),
                 Ok(root) => {
                     if let Some(filter) = self.filter {
+                        let root_time = match NaiveDateTime::from_timestamp_opt(root.time, 0) {
+                            Some(v) => v,
+                            None => return Some(Err(Error::Msg("Invalid time"))),
+                        };
                         if *filter != format!("{}", root.id)
-                            && *filter
-                                != format!(
-                                    "{} {}",
-                                    root.host,
-                                    NaiveDateTime::from_timestamp(root.time, 0)
-                                )
+                            && *filter != format!("{} {}", root.host, root_time,)
                             && *filter != *root.hash
                         {
                             continue;
@@ -504,7 +503,10 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
                 }
             }
         }
-        let time_str = std::format!("{}", NaiveDateTime::from_timestamp(root.time, 0));
+        let time_str = std::format!(
+            "{}",
+            NaiveDateTime::from_timestamp_opt(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+        );
         let usage_str = std::format!("{}", Size::from(total_size - old_total_size));
         let size_str = std::format!("{}", Size::from(size));
         let sum_str = std::format!("{}", Size::from(total_size));
@@ -570,7 +572,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
         info!(
             "Visiting root {} {}",
             root.host,
-            NaiveDateTime::from_timestamp(root.time, 0)
+            NaiveDateTime::from_timestamp_opt(root.time, 0).ok_or(Error::Msg("Invalid time"))?
         );
 
         let v = match get_root(&mut client, config, secrets, root.hash) {
@@ -764,7 +766,8 @@ pub fn run_prune(
                     info!(
                         "Removing root {} {}",
                         root.host,
-                        NaiveDateTime::from_timestamp(root.time, 0)
+                        NaiveDateTime::from_timestamp_opt(root.time, 0)
+                            .ok_or(Error::Msg("Invalid time"))?
                     );
                     if !dry {
                         let url = format!(

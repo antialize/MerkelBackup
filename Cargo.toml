@@ -2,7 +2,7 @@
 edition = "2021"
 
 name = "mbackup"
-version = "0.1.0"
+version = "0.1.1"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
@@ -19,18 +19,18 @@ path = "src/dummy_server.rs"
 
 [dependencies]
 log = "0.4"
-rusqlite = "0.27"
+rusqlite = "0.28"
 rust-crypto = "0.2"
 rand = "0.8"
 reqwest = {version = "0.11", features=["blocking"]}
 hex = "0.4"
-clap = {version = "3", features = ["derive"] }
+clap = {version = "4", features = ["derive"] }
 toml = "0.5"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
-base64 = "0.13"
+base64 = "0.21"
 pbr = "1.0"
-nix = "0.24"
+nix = "0.26"
 libc = "0.2"
 rust-lzma = "0.5"
 itertools = "0.10"

@@ -37,7 +37,7 @@ pub struct User {
 }
 
 /// The log level as defined in the config file
-#[derive(Deserialize, PartialEq, clap::ArgEnum, Clone, Copy, Debug)]
+#[derive(Deserialize, PartialEq, clap::ValueEnum, Clone, Copy, Debug)]
 pub enum Level {
     Off,
     Error,
@@ -87,7 +87,7 @@ impl Default for Config {
 #[clap(author, version, about="A server for mbackup", long_about = None)]
 struct Args {
     /// Sets the level of verbosity
-    #[clap(arg_enum, short, long)]
+    #[clap(value_enum, short, long)]
     verbosity: Option<Level>, //Option<log::LevelFilter>,
 
     /// The interface/port to bind to

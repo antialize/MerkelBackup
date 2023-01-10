@@ -98,7 +98,7 @@ fn derive_secrets(password: &str) -> Secrets {
 #[clap(author, version, about="A client for mbackup", long_about = None)]
 struct Args {
     /// Sets the level of verbosity
-    #[clap(arg_enum, short, long)]
+    #[clap(value_enum, short, long)]
     verbosity: Option<Level>, //Option<log::LevelFilter>,
 
     /// The user to connect as
@@ -337,7 +337,7 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
             "{:<5} {:12} {}",
             id,
             host,
-            NaiveDateTime::from_timestamp(time, 0)
+            NaiveDateTime::from_timestamp_opt(time, 0).ok_or(Error::Msg("Invalid time"))?
         );
     }
     Ok(())
