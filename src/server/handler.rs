@@ -84,7 +84,7 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
         if format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD
-                .encode(&format!("{}:{}", user.name, user.password))
+                .encode(format!("{}:{}", user.name, user.password))
         ) != auth
         {
             continue;

@@ -58,7 +58,7 @@ pub fn setup_db(conf: &Config) -> Connection {
     let conn = Connection::open(format!("{}/backup.db", conf.data_dir))
         .expect("Unable to open hash cache");
 
-    conn.pragma_update(None, "journal_mode", &"WAL".to_string())
+    conn.pragma_update(None, "journal_mode", "WAL")
         .expect("Cannot enable wal");
 
     trace!("Creating chunks table");

@@ -79,7 +79,7 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
     let url = format!(
         "{}/chunks/{}/{}",
         &state.config.server,
-        hex::encode(&state.secrets.bucket),
+        hex::encode(state.secrets.bucket),
         &chunk
     );
     let res = retry(&mut || {
@@ -110,7 +110,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         let url = format!(
             "{}/chunks/{}/{}",
             &state.config.server,
-            hex::encode(&state.secrets.bucket),
+            hex::encode(state.secrets.bucket),
             &hash
         );
 
@@ -211,7 +211,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     }
 
     // Open the file and read each chunk
-    let mut file = fs::File::open(&path)?;
+    let mut file = fs::File::open(path)?;
 
     let mut buffer: Vec<u8> = Vec::new();
     buffer.resize(u64::min(size, CHUNK_SIZE) as usize, 0);
@@ -347,7 +347,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
         "{}/status/{}",
         &state.config.server,
-        hex::encode(&state.secrets.bucket)
+        hex::encode(state.secrets.bucket)
     );
 
     let last_delete: i64 = check_response(&mut || {
@@ -375,7 +375,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
         "{}/chunks/{}",
         &state.config.server,
-        hex::encode(&state.secrets.bucket)
+        hex::encode(state.secrets.bucket)
     );
     let content = check_response(&mut || {
         state
@@ -401,7 +401,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
 
     let conn = Connection::open(&config.cache_db)?;
 
-    conn.pragma_update(None, "journal_mode", &"WAL".to_string())?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
 
     // Note that UNIQUE constraints automatically create indexes
     // (according to experimentation).
@@ -486,7 +486,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         }
         info!("Backing up {}", &dir);
 
-        let md = fs::metadata(&path)?;
+        let md = fs::metadata(path)?;
         state.entries.push(DirEnt {
             path: dir.to_string(),
             etype: EType::Dir,
@@ -537,7 +537,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     let url = format!(
         "{}/roots/{}/{}",
         &state.config.server,
-        hex::encode(&state.secrets.bucket),
+        hex::encode(state.secrets.bucket),
         &state.config.hostname
     );
 

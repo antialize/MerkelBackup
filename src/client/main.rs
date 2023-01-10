@@ -311,7 +311,7 @@ fn parse_config() -> Result<(Config, Commands), Error> {
 
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
     let client = reqwest::blocking::Client::new();
-    let url = format!("{}/roots/{}", &config.server, hex::encode(&secrets.bucket));
+    let url = format!("{}/roots/{}", &config.server, hex::encode(secrets.bucket));
     let res = check_response(&mut || {
         client
             .get(&url[..])
@@ -325,7 +325,7 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
             continue;
         }
         let ans: Vec<&str> = row.split('\0').collect();
-        let id: u64 = ans.get(0).ok_or(Error::MissingRow())?.parse()?;
+        let id: u64 = ans.first().ok_or(Error::MissingRow())?.parse()?;
         let host: &str = ans.get(1).ok_or(Error::MissingRow())?;
         let time: i64 = ans.get(2).ok_or(Error::MissingRow())?.parse()?;
         if let Some(name) = host_name {
@@ -354,7 +354,7 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
             let url = format!(
                 "{}/roots/{}/{}",
                 &config.server,
-                hex::encode(&secrets.bucket),
+                hex::encode(secrets.bucket),
                 root.id
             );
             check_response(&mut || {
