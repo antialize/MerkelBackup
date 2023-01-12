@@ -22,7 +22,7 @@ log = "0.4"
 rusqlite = {version = "0.28", features = ["bundled"] }
 rust-crypto = "0.2"
 rand = "0.8"
-reqwest = {version = "0.11", features=["blocking"]}
+reqwest = {version = "0.11", features=["blocking", "rustls-tls"], default-features=false}
 hex = "0.4"
 clap = {version = "4", features = ["derive"] }
 toml = "0.5"
