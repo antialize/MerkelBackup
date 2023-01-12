@@ -1,20 +1,18 @@
-FROM docker.io/rust:latest as builder
+FROM docker.io/rust:latest AS chef
+RUN cargo install cargo-chef 
 WORKDIR /mbackup
-# Note: "cargo install" ignores Cargo.lock, so there's no point in copying it in.
-COPY Cargo.toml ./
-RUN \
-mkdir src && \
-mkdir src/client && \
-mkdir src/server && \
-echo "fn main() {panic!(\"OH NO\")}" > src/client/main.rs && \
-echo "fn main() {panic!(\"OH NO\")}" > src/server/main.rs && \
-echo "fn main() {panic!(\"OH NO\")}" > src/dummy_server.rs
-RUN CARGO_TARGET_DIR=target cargo install --root /usr --path .
-RUN rm -f target/release/deps/mbackup*
-COPY src/ src/
-RUN CARGO_TARGET_DIR=target cargo install --offline --root /usr --path .
 
-FROM rust
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /mbackup/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo install --offline --root /usr --path .
+
+FROM debian:stable-slim
 ARG GIT_COMMIT
 ARG GIT_COMMIT_FULL
 ARG GIT_BRANCH
