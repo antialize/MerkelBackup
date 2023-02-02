@@ -127,15 +127,15 @@ struct Args {
 
 #[derive(Parser)]
 struct BackupCommand {
-    // Recheck all the hashes
+    /// Recheck all the hashes
     #[clap(long)]
     recheck: Option<bool>,
 
-    //The path to the hash cache db
+    /// The path to the hash cache db
     #[clap(long = "cache-db")]
     cache_db: Option<String>,
 
-    //Hostname to back up as
+    /// Hostname to back up as
     #[clap(long)]
     hostname: Option<String>,
 
@@ -146,25 +146,30 @@ struct BackupCommand {
 
 #[derive(Parser)]
 struct PruneCommand {
-    // Don't actually remove anything
+    /// Don't actually remove anything
     #[clap(long)]
     dry: bool,
 
-    // Prune all roots older than this many days
+    /// Prune all roots older than this many days
     #[clap(long)]
     age: Option<u32>,
+
+    /// Keep roots one for the last 12 days, the last 12 weeks
+    /// the last 12 months, and every half year for each host
+    #[clap(long)]
+    exponential: bool,
 }
 
 #[derive(Parser)]
 struct ValidateCommand {
-    // Also check that all files have the right content
+    /// Also check that all files have the right content
     #[clap(long)]
     full: bool,
 }
 
 #[derive(Parser)]
 struct RootsCommand {
-    // Hostname to list roots from
+    /// Hostname to list roots from
     #[clap(long)]
     hostname: Option<String>,
 }
@@ -406,7 +411,7 @@ fn main() -> Result<(), Error> {
             true
         }
         Commands::Validate(c) => visit::run_validate(config, secrets, c.full)?,
-        Commands::Prune(c) => visit::run_prune(config, secrets, c.dry, c.age)?,
+        Commands::Prune(c) => visit::run_prune(config, secrets, c.dry, c.age, c.exponential)?,
         Commands::Restore(c) => visit::run_restore(config, secrets, c)?,
         Commands::Cat(c) => visit::run_cat(config, secrets, c.root, c.path)?,
         Commands::DeleteRoot(c) => {

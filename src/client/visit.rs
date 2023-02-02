@@ -739,6 +739,7 @@ pub fn run_prune(
     secrets: Secrets,
     dry: bool,
     age: Option<u32>,
+    exponential: bool,
 ) -> Result<bool, Error> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
@@ -759,38 +760,66 @@ pub fn run_prune(
     })?
     .text()?;
 
+    let mut last_host_root_time = HashMap::new();
+
     let (_, ok) = find_entries(
         &config,
         &secrets,
         None,
         |root| {
-            if let Some(age) = age {
-                if root.time + 60 * 60 * 24 * i64::from(age) < now {
-                    info!(
-                        "Removing root {} {}",
-                        root.host,
-                        NaiveDateTime::from_timestamp_opt(root.time, 0)
-                            .ok_or(Error::Msg("Invalid time"))?
-                    );
-                    if !dry {
-                        let url = format!(
-                            "{}/roots/{}/{}",
-                            &config.server,
-                            hex::encode(secrets.bucket),
-                            root.id
-                        );
-                        check_response(&mut || {
-                            client
-                                .delete(&url[..])
-                                .timeout(Duration::from_secs(5 * 60))
-                                .basic_auth(&config.user, Some(&config.password))
-                                .send()
-                        })?;
+            let remove = if exponential {
+                // We visit roots in increasing time order
+                // Keep roots one for the last 12 days, the last 12 weeks
+                // the last 12 months, and every half year for each host
+                let keep = if let Some(lt) = last_host_root_time.get(root.host) {
+                    const GRACE: i64 = 60 * 60 * 12;
+                    if root.time + 60 * 60 * 24 * 12 >= now {
+                        // Keep all roots less than 12 dayes old
+                        true
+                    } else if root.time + 60 * 60 * 24 * 7 * 12 >= now {
+                        root.time >= lt + 60 * 60 * 24 * 7 - GRACE
+                    } else if root.time + 60 * 60 * 24 * 366 >= now {
+                        root.time >= lt + 60 * 60 * 24 * 31 - GRACE
+                    } else {
+                        root.time >= lt + 60 * 60 * 24 * 182 - GRACE
                     }
-                    Ok(false)
                 } else {
-                    Ok(true)
+                    // Keep the first root for the host
+                    true
+                };
+                if keep {
+                    last_host_root_time.insert(root.host.to_string(), root.time);
                 }
+                !keep
+            } else if let Some(age) = age {
+                root.time + 60 * 60 * 24 * i64::from(age) < now
+            } else {
+                false
+            };
+
+            if remove {
+                info!(
+                    "Removing root {} {}",
+                    root.host,
+                    NaiveDateTime::from_timestamp_opt(root.time, 0)
+                        .ok_or(Error::Msg("Invalid time"))?
+                );
+                if !dry {
+                    let url = format!(
+                        "{}/roots/{}/{}",
+                        &config.server,
+                        hex::encode(secrets.bucket),
+                        root.id
+                    );
+                    check_response(&mut || {
+                        client
+                            .delete(&url[..])
+                            .timeout(Duration::from_secs(5 * 60))
+                            .basic_auth(&config.user, Some(&config.password))
+                            .send()
+                    })?;
+                }
+                Ok(false)
             } else {
                 Ok(true)
             }
