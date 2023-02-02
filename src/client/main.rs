@@ -262,11 +262,21 @@ fn parse_config() -> Result<(Config, Commands), Error> {
         config.password = v;
     }
     if config.password.is_empty() {
+        if let Ok(v) = std::env::var("PASSWORD") {
+            config.password = v;
+        }
+    }
+    if config.password.is_empty() {
         return Err(Error::Msg("No password specified"));
     }
 
     if let Some(v) = args.encryption_key {
         config.encryption_key = v;
+    }
+    if config.encryption_key.is_empty() {
+        if let Ok(v) = std::env::var("KEY") {
+            config.encryption_key = v;
+        }
     }
     if config.encryption_key.is_empty() {
         return Err(Error::Msg("No encryption key specified"));
