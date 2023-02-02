@@ -150,7 +150,7 @@ struct PruneCommand {
     #[clap(long)]
     dry: bool,
 
-    // Prune all rots older than this
+    // Prune all roots older than this many days
     #[clap(long)]
     age: Option<u32>,
 }
