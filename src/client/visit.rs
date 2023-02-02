@@ -75,6 +75,7 @@ fn get_chunk(
     let mut res = check_response(&mut || {
         client
             .get(&url[..])
+            .timeout(Duration::from_secs(2 * 60))
             .basic_auth(&config.user, Some(&config.password))
             .send()
     })?;
@@ -317,6 +318,7 @@ pub fn roots<'a: 'b, 'b>(
     let res = check_response(&mut || {
         client
             .get(&url[..])
+            .timeout(Duration::from_secs(2 * 60))
             .basic_auth(&config.user, Some(&config.password))
             .send()
     })?;
@@ -751,6 +753,7 @@ pub fn run_prune(
     let content = check_response(&mut || {
         client
             .get(&url[..])
+            .timeout(Duration::from_secs(10 * 60))
             .basic_auth(&config.user, Some(&config.password))
             .send()
     })?
@@ -779,6 +782,7 @@ pub fn run_prune(
                         check_response(&mut || {
                             client
                                 .delete(&url[..])
+                                .timeout(Duration::from_secs(5 * 60))
                                 .basic_auth(&config.user, Some(&config.password))
                                 .send()
                         })?;
@@ -856,6 +860,7 @@ pub fn run_prune(
         match check_response(&mut || {
             client
                 .delete(&url[..])
+                .timeout(Duration::from_secs(5 * 60))
                 .basic_auth(&config.user, Some(&config.password))
                 .body(data.clone())
                 .send()
