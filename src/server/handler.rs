@@ -610,9 +610,9 @@ fn do_list_chunks(
                     Err(_) => return Err(Error::Server("Unable to access metadata")),
                 }
             };
-            writeln!(ans, "{} {} {}", chunk, size, content_size).unwrap();
+            writeln!(ans, "{chunk} {size} {content_size}").unwrap();
         } else {
-            writeln!(ans, "{} {}", chunk, size).unwrap();
+            writeln!(ans, "{chunk} {size}").unwrap();
         }
     }
     Ok(ans)
@@ -640,7 +640,7 @@ async fn handle_get_status(
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error",
     );
-    ok_message(Some(format!("{}", time)))
+    ok_message(Some(format!("{time}")))
 }
 
 fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
@@ -687,7 +687,7 @@ fn do_get_roots(conn: &mut rusqlite::Connection, bucket: &str) -> Result<String>
             ans.push('\0');
             ans.push('\0');
         }
-        ans.push_str(&format!("{}\0{}\0{}\0{}", id, host, time, hash));
+        ans.push_str(&format!("{id}\0{host}\0{time}\0{hash}"));
     }
     Ok(ans)
 }
@@ -854,10 +854,9 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
 
     write!(
         ans,
-        "merkelbackup_rows_count{{merkelbackup_table=\"roots\"}} {}\n\
-        merkelbackup_rows_count{{merkelbackup_table=\"chunks\"}} {}\n\
-        merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {}\n\n",
-        roots_max_id, chunks_max_id, deletes_count,
+        "merkelbackup_rows_count{{merkelbackup_table=\"roots\"}} {roots_max_id}\n\
+        merkelbackup_rows_count{{merkelbackup_table=\"chunks\"}} {chunks_max_id}\n\
+        merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {deletes_count}\n\n",
     )
     .unwrap();
 

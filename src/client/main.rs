@@ -377,7 +377,7 @@ fn ping(config: Config, secrets: Secrets) -> Result<(), Error> {
         let start = std::time::Instant::now();
         visit::roots(&config, &secrets, &client, None)?;
         let duration = start.elapsed();
-        println!("Ping {:?}", duration);
+        println!("Ping {duration:?}");
     }
 }
 

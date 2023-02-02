@@ -21,7 +21,7 @@ impl std::fmt::Display for Size {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let bytes = self.bytes;
         if bytes < 1024 {
-            write!(f, "{} B", bytes)
+            write!(f, "{bytes} B")
         } else if bytes < 1024 * 64 {
             write!(f, "{:.1} KiB", bytes as f64 / 1024.0)
         } else if bytes < 1024 * 1024 {
@@ -354,7 +354,7 @@ fn full_validate(
     let mut bad_files: usize = 0;
     for (hash, (idx, path)) in files.iter() {
         if let Some(pb) = &mut pb {
-            pb.message(&format!("{:?}:{} ", path, idx));
+            pb.message(&format!("{path:?}:{idx} "));
         }
         if hash == &"empty" {
             continue;

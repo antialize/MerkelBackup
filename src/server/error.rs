@@ -22,9 +22,9 @@ impl From<rusqlite::Error> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            Error::Hyper(ref e) => write!(f, "{}", e),
-            Error::Rusqlite(ref e) => write!(f, "{}", e),
-            Error::Server(s) => write!(f, "{}", s),
+            Error::Hyper(ref e) => write!(f, "{e}"),
+            Error::Rusqlite(ref e) => write!(f, "{e}"),
+            Error::Server(s) => write!(f, "{s}"),
         }
     }
 }
