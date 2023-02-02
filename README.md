@@ -1,6 +1,6 @@
 # MerkelBackup
 
-[![Travis Build Status](https://travis-ci.org/antialize/MerkelBackup.svg?branch=master)](https://travis-ci.org/antialize/MerkelBackup)
+[![CI](https://github.com/antialize/MerkelBackup/actions/workflows/rust.yml/badge.svg)](https://github.com/antialize/MerkelBackup/actions/workflows/rust.yml)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 
