@@ -75,7 +75,7 @@ fn get_chunk(
     let mut res = check_response(&mut || {
         client
             .get(&url[..])
-            .timeout(Duration::from_secs(2 * 60))
+            .timeout(Duration::from_secs(10 * 60))
             .basic_auth(&config.user, Some(&config.password))
             .send()
     })?;
@@ -237,6 +237,7 @@ fn recover_entry(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 pub struct Root<'l> {
     pub id: u64,
     pub host: &'l str,
@@ -328,14 +329,14 @@ pub fn roots<'a: 'b, 'b>(
 }
 
 fn full_validate(
-    entries: &[Ent],
+    entries: &[(Root<'_>, Ent)],
     client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
 ) -> Result<bool, Error> {
     let mut files: HashMap<&str, (usize, &PathBuf)> = HashMap::new();
     let mut bytes: u64 = 0;
-    for ent in entries.iter() {
+    for (_, ent) in entries.iter() {
         if ent.etype != EType::File {
             continue;
         }
@@ -388,7 +389,7 @@ fn full_validate(
 }
 
 fn partial_validate(
-    entries: &[Ent],
+    entries: &[(Root<'_>, Ent)],
     client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
@@ -423,7 +424,7 @@ fn partial_validate(
     }
     let mut ok = true;
     info!("Checking entries");
-    for ent in entries {
+    for (_, ent) in entries {
         if ent.etype != EType::File {
             continue;
         }
@@ -554,18 +555,21 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
     Ok(())
 }
 
-fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<bool, Error>>(
+fn find_entries2<
+    'a,
+    Handler: FnMut(Root<'a>, Ent),
+    Filter: for<'b> FnMut(&Root<'b>) -> Result<bool, Error>,
+>(
+    client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
-    only_root: Option<&str>,
+    roots: &'a Roots<'a>,
     mut filter_root: Filter,
     mut handle_entry: Handler,
 ) -> Result<(bool, bool), Error> {
-    let mut client = reqwest::blocking::Client::new();
     let mut root_found = false;
     let mut ok = true;
-    let x = roots(config, secrets, &client, only_root)?;
-    for root in x.iter() {
+    for root in roots.iter() {
         let root = root?;
         root_found = true;
         if !filter_root(&root)? {
@@ -577,7 +581,7 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
             NaiveDateTime::from_timestamp_opt(root.time, 0).ok_or(Error::Msg("Invalid time"))?
         );
 
-        let v = match get_root(&mut client, config, secrets, root.hash) {
+        let v = match get_root(client, config, secrets, root.hash) {
             Err(e) => {
                 error!("Bad root {}: {:?}", root.hash.to_string(), e);
                 ok = false;
@@ -586,22 +590,25 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
             Ok(v) => v,
         };
 
-        handle_entry(Ent {
-            path: PathBuf::new(),
-            etype: EType::Root,
-            size: 0,
-            st_mode: 0,
-            uid: 0,
-            gid: 0,
-            mtime: 0,
-            chunks: vec![root.hash.to_string()],
-        });
+        handle_entry(
+            root,
+            Ent {
+                path: PathBuf::new(),
+                etype: EType::Root,
+                size: 0,
+                st_mode: 0,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                chunks: vec![root.hash.to_string()],
+            },
+        );
 
         for row in v.split("\0\0") {
             match row_entry(row) {
                 Ok(None) => {}
                 Ok(Some(ent)) => {
-                    handle_entry(ent);
+                    handle_entry(root, ent);
                 }
                 Err(e) => {
                     ok = false;
@@ -613,18 +620,33 @@ fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<
     Ok((root_found, ok))
 }
 
+fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<bool, Error>>(
+    config: &Config,
+    secrets: &Secrets,
+    only_root: Option<&str>,
+    filter_root: Filter,
+    mut handle_entry: Handler,
+) -> Result<(bool, bool), Error> {
+    let mut client = reqwest::blocking::Client::new();
+    let roots = roots(config, secrets, &client, only_root)?;
+    find_entries2(&mut client, config, secrets, &roots, filter_root, |_, e| {
+        handle_entry(e)
+    })
+}
+
 pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool, Error> {
     let mut client = reqwest::blocking::Client::new();
+    let roots = roots(&config, &secrets, &client, None)?;
 
-    let mut entries: Vec<Ent> = Vec::new();
-
-    let (_, mut ok) = find_entries(
+    let mut entries = Vec::new();
+    let (_, mut ok) = find_entries2(
+        &mut client,
         &config,
         &secrets,
-        None,
+        &roots,
         |_| Ok(true),
-        |ent| {
-            entries.push(ent);
+        |root, ent| {
+            entries.push((root, ent));
         },
     )?;
 

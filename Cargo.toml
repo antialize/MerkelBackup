@@ -17,6 +17,10 @@ path = "src/client/main.rs"
 name = "dummy_server"
 path = "src/dummy_server.rs"
 
+[[bin]]
+name = "offline_validate"
+path = "src/offline_validate.rs"
+
 [dependencies]
 log = "0.4"
 rusqlite = {version = "0.28", features = ["bundled"] }
