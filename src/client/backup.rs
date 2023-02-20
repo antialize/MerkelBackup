@@ -259,7 +259,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
         Ok(v) => v,
     };
     for entry in raw_entries {
-        let path = entry?.path();
+        let mut path = entry?.path();
         let md = match fs::symlink_metadata(&path) {
             Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -268,17 +268,24 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             }
             Ok(v) => v,
         };
-        let path_str = path
+        let path_string = path
             .to_str()
-            .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
-        if path_str.contains('\0') {
+            .ok_or_else(|| Error::BadPath(path.to_path_buf()))?
+            .to_string();
+        if path_string.contains('\0') {
             return Err(Error::BadPath(path.to_path_buf()));
         }
         let ft = md.file_type();
         let mode = md.st_mode() & 0xFFF;
         if ft.is_dir() {
+            path.push(".mbackupskip");
+            let should_skip = path.exists();
+            path.pop();
+            if should_skip {
+                continue;
+            }
             state.entries.push(DirEnt {
-                path: path_str.to_string(),
+                path: path_string,
                 etype: EType::Dir,
                 content: "0".to_string(),
                 size: 0,
@@ -295,17 +302,18 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
+            let content = match backup_file(&path, md.len(), mtime, state) {
+                Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    error!("Unable to backup file {}: {:?}\n", &path_string, e);
+                    continue;
+                }
+                Ok(v) => v,
+            };
             let ent = DirEnt {
-                path: path_str.to_string(),
+                path: path_string,
                 etype: EType::File,
-                content: match backup_file(&path, md.len(), mtime, state) {
-                    Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => {
-                        error!("Unable to backup file {}: {:?}\n", path_str, e);
-                        continue;
-                    }
-                    Ok(v) => v,
-                },
+                content,
                 size: md.len(),
                 mode,
                 uid: md.st_uid(),
@@ -324,7 +332,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
                 Ok(v) => v,
             };
             state.entries.push(DirEnt {
-                path: path_str.to_string(),
+                path: path_string,
                 etype: EType::Link,
                 content: link
                     .to_str()
