@@ -1,7 +1,5 @@
-extern crate serde;
 use log::{debug, warn};
 use serde::Deserialize;
-extern crate crypto;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EType {
@@ -129,6 +127,7 @@ pub enum Error {
     Toml(toml::de::Error),
     Nix(nix::Error),
     Lzma(lzma::LzmaError),
+    StreamCipherError(cipher::StreamCipherError),
 }
 
 impl From<rusqlite::Error> for Error {
@@ -182,6 +181,12 @@ impl From<nix::Error> for Error {
 impl From<lzma::LzmaError> for Error {
     fn from(error: lzma::LzmaError) -> Self {
         Error::Lzma(error)
+    }
+}
+
+impl From<cipher::StreamCipherError> for Error {
+    fn from(error: cipher::StreamCipherError) -> Self {
+        Error::StreamCipherError(error)
     }
 }
 

@@ -2,7 +2,7 @@
 edition = "2021"
 
 name = "mbackup"
-version = "0.1.1"
+version = "0.1.2"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
@@ -23,8 +23,7 @@ path = "src/offline_validate.rs"
 
 [dependencies]
 log = "0.4"
-rusqlite = {version = "0.28", features = ["bundled"] }
-rust-crypto = "0.2"
+rusqlite = {version = "0.29", features = ["bundled"] }
 rand = "0.8"
 reqwest = {version = "0.11", features=["blocking", "rustls-tls"], default-features=false}
 hex = "0.4"
@@ -36,8 +35,12 @@ base64 = "0.21"
 pbr = "1.0"
 nix = "0.26"
 libc = "0.2"
-rust-lzma = "0.5"
+rust-lzma = "0.6"
 itertools = "0.10"
 hyper = {version="0.14", features =["http1", "runtime", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
 sd-notify = "0.4"
+blake2 = "0.10.6"
+chacha20 = "0.9.1"
+digest = "0.10.6"
+cipher = "0.4.4"

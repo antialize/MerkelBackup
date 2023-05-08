@@ -1,9 +1,8 @@
 use crate::shared::{check_response, Config, EType, Error, Level, Secrets};
 use crate::RestoreCommand;
+use blake2::Digest;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chrono::NaiveDateTime;
-use crypto::blake2b::Blake2b;
-use crypto::digest::Digest;
-use crypto::symmetriccipher::SynchronousStreamCipher;
 use log::{debug, error, info};
 use pbr::ProgressBar;
 use std::collections::{HashMap, HashSet};
@@ -89,14 +88,15 @@ fn get_chunk(
 
     let mut content = Vec::with_capacity(encrypted.len());
     content.resize(encrypted.len() - 12, 0);
-    crypto::chacha20::ChaCha20::new(&secrets.key, &encrypted[..12])
-        .process(&encrypted[12..], &mut content);
+    let nonce: [u8; 12] = encrypted[..12].try_into().unwrap();
+    chacha20::ChaCha20::new(&secrets.key.into(), &nonce.into())
+        .apply_keystream_b2b(&encrypted[12..], &mut content)?;
 
-    let mut hasher = Blake2b::new(256 / 8);
-    hasher.input(&secrets.seed);
-    hasher.input(&content);
+    let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
+    hasher.update(&secrets.seed);
+    hasher.update(&content);
 
-    if hasher.result_str() != hash {
+    if hex::encode(hasher.finalize()) != hash {
         Err(Error::InvalidHash())
     } else {
         Ok(content)

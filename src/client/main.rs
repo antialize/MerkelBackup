@@ -1,23 +1,10 @@
-extern crate chrono;
-extern crate clap;
-extern crate crypto;
-extern crate hex;
-extern crate libc;
-extern crate log;
-extern crate nix;
-extern crate pbr;
-extern crate rand;
-extern crate reqwest;
-extern crate rusqlite;
-extern crate serde;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use crypto::blake2b::Blake2b;
-use crypto::digest::Digest;
 mod backup;
 mod shared;
 mod visit;
+use blake2::Digest;
 use chrono::NaiveDateTime;
 use log::{debug, error};
 use shared::{check_response, Config, Error, Level, Secrets};
@@ -66,7 +53,7 @@ fn derive_secrets(password: &str) -> Secrets {
     const ROUNDS: usize = 16;
     const W: usize = 32;
     const X: usize = std::mem::size_of::<usize>();
-    let mut hasher = Blake2b::new(W);
+    let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
     let mut data: Vec<u8> = Vec::new();
     data.resize(W * ITEMS, 42);
     for _ in 0..ROUNDS {
@@ -78,12 +65,13 @@ fn derive_secrets(password: &str) -> Secrets {
             let mut o2: [u8; X] = [0; X];
             o2.copy_from_slice(&data[prev * W + X..prev * W + 2 * X]);
             let o2 = usize::from_ne_bytes(o2) & (ITEMS - 1);
-            hasher.reset();
-            hasher.input(password.as_bytes());
-            hasher.input(&data[prev * W..(prev + 1) * W]);
-            hasher.input(&data[o1 * W..(o1 + 1) * W]);
-            hasher.input(&data[o2 * W..(o2 + 1) * W]);
-            hasher.result(&mut data[cur * W..(cur + 1) * W]);
+            hasher.update(password.as_bytes());
+            hasher.update(&data[prev * W..(prev + 1) * W]);
+            hasher.update(&data[o1 * W..(o1 + 1) * W]);
+            hasher.update(&data[o2 * W..(o2 + 1) * W]);
+            hasher.finalize_into_reset(digest::generic_array::GenericArray::from_mut_slice(
+                &mut data[cur * W..(cur + 1) * W],
+            ));
             prev = cur;
         }
     }

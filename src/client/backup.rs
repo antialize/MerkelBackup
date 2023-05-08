@@ -7,9 +7,8 @@ use std::time::SystemTime;
 
 use crate::shared::Level;
 use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
-use crypto::blake2b::Blake2b;
-use crypto::digest::Digest;
-use crypto::symmetriccipher::SynchronousStreamCipher;
+use blake2::Digest;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use log::debug;
 use log::error;
 use log::info;
@@ -98,10 +97,10 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
 
 fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     let now = std::time::Instant::now();
-    let mut hasher = Blake2b::new(256 / 8);
-    hasher.input(&state.secrets.seed);
-    hasher.input(content);
-    let hash = hasher.result_str();
+    let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
+    hasher.update(&state.secrets.seed);
+    hasher.update(content);
+    let hash = hex::encode(hasher.finalize());
     let t0 = now.elapsed().as_millis();
     let hc = has_chunk(&hash, state, Some(content.len()))?;
     let t1 = now.elapsed().as_millis();
@@ -117,9 +116,9 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         let mut crypted = Vec::new();
         crypted.resize(content.len() + 12, 0);
         state.rng.fill(&mut crypted[..12]);
-
-        crypto::chacha20::ChaCha20::new(&state.secrets.key, &crypted[..12])
-            .process(content, &mut crypted[12..]);
+        let nonce: [u8; 12] = crypted[..12].try_into().unwrap();
+        chacha20::ChaCha20::new(&state.secrets.key.into(), &nonce.into())
+            .apply_keystream_b2b(content, &mut crypted[12..])?;
         t2 = now.elapsed().as_millis();
 
         let res = retry(&mut || {
