@@ -732,7 +732,6 @@ pub fn run_cat(
         return Err(Error::Msg("Root not found"));
     }
     let mut it = entries.iter();
-    let _root = it.next().unwrap();
     let ent = match it.next() {
         None => return Err(Error::Msg("Path not found")),
         Some(ent) => ent,
