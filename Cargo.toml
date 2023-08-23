@@ -36,7 +36,7 @@ pbr = "1.0"
 nix = "0.26"
 libc = "0.2"
 rust-lzma = "0.6"
-itertools = "0.10"
+itertools = "0.11"
 hyper = {version="0.14", features =["http1", "runtime", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
 sd-notify = "0.4"
