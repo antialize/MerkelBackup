@@ -34,6 +34,8 @@ pub struct User {
     pub name: String,
     pub password: String,
     pub access_level: AccessType,
+    #[serde(default)]
+    pub max_root_age: Option<u64>,
 }
 
 /// The log level as defined in the config file

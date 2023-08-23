@@ -4,6 +4,7 @@ use hyper::{Body, Method, Request, Response, StatusCode};
 use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -69,15 +70,19 @@ fn unauthorized_message() -> ResponseFuture {
 /// Check if the user has an access lever greater than or equal to level
 /// If he does None is returned
 /// Otherwise Some(unauthorized_message()) is returned
-fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Option<ResponseFuture> {
+fn check_auth<'a>(
+    req: &Request<Body>,
+    state: &'a State,
+    level: AccessType,
+) -> std::result::Result<&'a crate::config::User, ResponseFuture> {
     let auth = match req.headers().get("Authorization") {
         Some(data) => data,
-        None => return Some(unauthorized_message()),
+        None => return Err(unauthorized_message()),
     };
 
     let auth = match auth.to_str() {
         Ok(data) => data,
-        Err(_) => return Some(unauthorized_message()),
+        Err(_) => return Err(unauthorized_message()),
     };
 
     for user in state.config.users.iter() {
@@ -89,12 +94,16 @@ fn check_auth(req: &Request<Body>, state: Arc<State>, level: AccessType) -> Opti
         {
             continue;
         }
+        if level != AccessType::Get && user.max_root_age.is_some() {
+            // Do not allow users with max age to do none get requests
+            return Err(unauthorized_message());
+        }
         if user.access_level >= level {
-            return None;
+            return Ok(user);
         }
     }
 
-    Some(unauthorized_message())
+    Err(unauthorized_message())
 }
 
 /// Validate that a string is a valid hex encoding of a 256bit hash
@@ -103,7 +112,7 @@ fn check_hash(name: &str) -> Result<()> {
         return Err(Error::Server("wrong hash length"));
     }
     for c in name.chars() {
-        if ('0'..='9').contains(&c) {
+        if c.is_ascii_digit() {
             continue;
         }
         if ('a'..='f').contains(&c) {
@@ -131,7 +140,7 @@ async fn handle_put_chunk(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Put) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
         warn!("Unauthorized access for put chunk {}/{}", bucket, chunk);
         return res;
     }
@@ -259,9 +268,9 @@ async fn handle_get_chunk(
     state: Arc<State>,
     head: bool,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(
+    if let Err(res) = check_auth(
         &req,
-        state.clone(),
+        &state,
         if head {
             AccessType::Put
         } else {
@@ -441,7 +450,7 @@ async fn handle_delete_chunk(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
         warn!("Unauthorized access for delete chunk {}/{}", bucket, chunk);
         return res;
     }
@@ -481,7 +490,7 @@ async fn handle_delete_chunks(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
         warn!("Unauthorized access for delete chunks {}", bucket);
         return res;
     }
@@ -533,17 +542,24 @@ async fn handle_list_chunks(
 ) -> ResponseFuture {
     let validate = req.uri().query().map_or(false, |q| q.contains("validate"));
 
-    if let Some(res) = check_auth(
+    match check_auth(
         &req,
-        state.clone(),
+        &state,
         if validate {
             AccessType::Get
         } else {
             AccessType::Put
         },
     ) {
-        warn!("Unauthorized access for list chunks {}", bucket);
-        return res;
+        Err(res) => {
+            warn!("Unauthorized access for list chunks {}", bucket);
+            return res;
+        }
+        Ok(u) if u.access_level == AccessType::Get && u.max_root_age.is_some() => {
+            warn!("Get user cannot access chunk list if max age is specified");
+            return unauthorized_message();
+        }
+        Ok(_) => (),
     }
 
     tryfut!(
@@ -623,7 +639,7 @@ async fn handle_get_status(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Put) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
         warn!("Unauthorized access for get status {}", bucket);
         return res;
     }
@@ -653,10 +669,19 @@ fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
 }
 
 async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Get) {
-        warn!("Unauthorized access for get roots {}", bucket);
-        return res;
-    }
+    let earliest_root = match check_auth(&req, &state, AccessType::Get) {
+        Err(res) => {
+            warn!("Unauthorized access for get roots {}", bucket);
+            return res;
+        }
+        Ok(u) => u.max_root_age.map(|v| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - v * 60 * 60 * 24
+        }),
+    };
     tryfut!(
         check_hash(bucket.as_ref()),
         StatusCode::BAD_REQUEST,
@@ -664,18 +689,24 @@ async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>)
     );
 
     state.stat.get_roots_count.inc();
+    // LIMIT response to only new roots
     ok_message(Some(tryfut!(
-        do_get_roots(&mut state.conn.lock().unwrap(), &bucket),
+        do_get_roots(&mut state.conn.lock().unwrap(), &bucket, earliest_root),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_get_roots failed"
     )))
 }
 
-fn do_get_roots(conn: &mut rusqlite::Connection, bucket: &str) -> Result<String> {
-    let mut stmt = conn.prepare("SELECT id, host, time, hash FROM roots WHERE bucket=?")?;
+fn do_get_roots(
+    conn: &mut rusqlite::Connection,
+    bucket: &str,
+    earliest_root: Option<u64>,
+) -> Result<String> {
+    let mut stmt =
+        conn.prepare("SELECT id, host, time, hash FROM roots WHERE bucket=? AND time >=?")?;
 
     let mut ans = "".to_string();
-    for t in stmt.query_map(params![bucket], |row| {
+    for t in stmt.query_map(params![bucket, earliest_root.unwrap_or(0)], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })? {
         let t = t?;
@@ -698,7 +729,7 @@ async fn handle_put_root(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Put) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
         warn!("Unauthorized access for put root {}", bucket);
         return res;
     }
@@ -752,7 +783,7 @@ async fn handle_delete_root(
     req: Request<Body>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    if let Some(res) = check_auth(&req, state.clone(), AccessType::Delete) {
+    if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
         warn!("Unauthorized access for delete root {}", bucket);
         return res;
     }
