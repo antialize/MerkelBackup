@@ -98,7 +98,7 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
 fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     let now = std::time::Instant::now();
     let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
-    hasher.update(&state.secrets.seed);
+    hasher.update(state.secrets.seed);
     hasher.update(content);
     let hash = hex::encode(hasher.finalize());
     let t0 = now.elapsed().as_millis();

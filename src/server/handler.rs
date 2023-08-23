@@ -112,7 +112,7 @@ fn check_hash(name: &str) -> Result<()> {
         return Err(Error::Server("wrong hash length"));
     }
     for c in name.chars() {
-        if ('0'..='9').contains(&c) {
+        if c.is_ascii_digit() {
             continue;
         }
         if ('a'..='f').contains(&c) {

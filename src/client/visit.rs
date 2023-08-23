@@ -93,7 +93,7 @@ fn get_chunk(
         .apply_keystream_b2b(&encrypted[12..], &mut content)?;
 
     let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
-    hasher.update(&secrets.seed);
+    hasher.update(secrets.seed);
     hasher.update(&content);
 
     if hex::encode(hasher.finalize()) != hash {
