@@ -46,15 +46,15 @@ pub enum Level {
 
 impl PartialOrd for Level {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        let a: log::LevelFilter = (*self).into();
-        let b: log::LevelFilter = (*other).into();
-        a.partial_cmp(&b)
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for Level {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
+        let a: log::LevelFilter = (*self).into();
+        let b: log::LevelFilter = (*other).into();
+        a.cmp(&b)
     }
 }
 
