@@ -194,21 +194,25 @@ pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error
 where
     F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
 {
-    for sleep in [5, 20, 60, 120].iter() {
-        match f() {
+    for sleep in [5, 20, 60, 120, 240, 280].iter() {
+        let sleep = match f() {
             Ok(res) => {
-                if !matches!(
-                    res.status(),
+                match res.status() {
                     reqwest::StatusCode::REQUEST_TIMEOUT
-                        | reqwest::StatusCode::TOO_MANY_REQUESTS
+                    | reqwest::StatusCode::GATEWAY_TIMEOUT => {
+                        warn!("Request timeout, retrying {}", res.status());
+                        u64::max(*sleep, 2*60)
+                    }
+                    reqwest::StatusCode::TOO_MANY_REQUESTS
                         | reqwest::StatusCode::INTERNAL_SERVER_ERROR
                         | reqwest::StatusCode::BAD_GATEWAY
-                        | reqwest::StatusCode::SERVICE_UNAVAILABLE
-                        | reqwest::StatusCode::GATEWAY_TIMEOUT
-                ) {
-                    return Ok(res);
-                } else {
-                    warn!("Request failed, retrying {}", res.status());
+                        | reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                        warn!("Request failed, retrying {}", res.status());
+                        *sleep
+                    }
+                    _ => {
+                        return Ok(res)
+                    }
                 }
             }
             Err(e) => {
@@ -217,9 +221,10 @@ where
                 } else {
                     warn!("Request failed, retrying {:?}", e)
                 }
+                *sleep
             }
         };
-        std::thread::sleep(std::time::Duration::from_secs(*sleep));
+        std::thread::sleep(std::time::Duration::from_secs(sleep));
     }
     f()
 }
