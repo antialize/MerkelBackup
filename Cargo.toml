@@ -28,7 +28,7 @@ rand = "0.8"
 reqwest = {version = "0.11", features=["blocking", "rustls-tls"], default-features=false}
 hex = "0.4"
 clap = {version = "4", features = ["derive"] }
-toml = "0.7"
+toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 base64 = "0.21"
@@ -40,7 +40,7 @@ itertools = "0.11"
 hyper = {version="0.14", features =["http1", "runtime", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
 sd-notify = "0.4"
-blake2 = "0.10.6"
-chacha20 = "0.9.1"
-digest = "0.10.6"
-cipher = "0.4.4"
+blake2 = "0.10"
+chacha20 = "0.9"
+digest = "0.10"
+cipher = "0.4"
