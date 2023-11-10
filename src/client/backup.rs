@@ -433,7 +433,12 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     let mut state = State {
         secrets,
         config,
-        client: reqwest::blocking::Client::new(),
+        client: reqwest::blocking::ClientBuilder::new()
+            .timeout(Duration::from_secs(60*4)) // Increase timout from default 30 seconds to 5 minutes
+            .no_brotli()
+            .no_deflate()
+            .no_gzip()
+            .build()?,
         scan: true,
         transfer_bytes: 0,
         progress: None,
