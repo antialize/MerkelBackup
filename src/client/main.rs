@@ -5,7 +5,7 @@ mod backup;
 mod shared;
 mod visit;
 use blake2::Digest;
-use chrono::NaiveDateTime;
+use chrono::DateTime;
 use log::{debug, error};
 use shared::{check_response, Config, Error, Level, Secrets};
 
@@ -340,7 +340,7 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
             "{:<5} {:12} {}",
             id,
             host,
-            NaiveDateTime::from_timestamp_opt(time, 0).ok_or(Error::Msg("Invalid time"))?
+            DateTime::from_timestamp(time, 0).ok_or(Error::Msg("Invalid time"))?
         );
     }
     Ok(())

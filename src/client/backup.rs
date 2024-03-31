@@ -113,8 +113,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
             &hash
         );
 
-        let mut crypted = Vec::new();
-        crypted.resize(content.len() + 12, 0);
+        let mut crypted = vec![0; content.len() + 12];
         state.rng.fill(&mut crypted[..12]);
         let nonce: [u8; 12] = crypted[..12].try_into().unwrap();
         chacha20::ChaCha20::new(&state.secrets.key.into(), &nonce.into())
@@ -212,8 +211,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     // Open the file and read each chunk
     let mut file = fs::File::open(path)?;
 
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.resize(u64::min(size, CHUNK_SIZE) as usize, 0);
+    let mut buffer = vec![0u8; u64::min(size, CHUNK_SIZE) as usize];
     let mut chunks = "".to_string();
     loop {
         let mut used = 0;

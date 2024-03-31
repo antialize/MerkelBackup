@@ -127,6 +127,7 @@ pub enum Error {
     Toml(toml::de::Error),
     Nix(nix::Error),
     Lzma(lzma::LzmaError),
+    #[allow(clippy::enum_variant_names)]
     StreamCipherError(cipher::StreamCipherError),
 }
 
