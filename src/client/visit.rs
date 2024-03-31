@@ -224,7 +224,7 @@ fn recover_entry(
                 &dpath,
                 Some(nix::unistd::Uid::from_raw(ent.uid)),
                 Some(nix::unistd::Gid::from_raw(ent.gid)),
-                nix::unistd::FchownatFlags::NoFollowSymlink,
+                nix::unistd::FchownatFlags::AT_SYMLINK_NOFOLLOW,
             )?;
         }
         nix::sys::stat::lutimes(

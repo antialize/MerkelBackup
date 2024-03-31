@@ -12,19 +12,16 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 extern crate chrono;
-
-use hyper::service::make_service_fn;
-use hyper::service::service_fn;
-use hyper::Server;
 use std::sync::{Arc, Mutex};
 
 mod config;
 mod error;
 use config::parse_config;
-use error::Error;
 mod handler;
 use handler::backup_serve;
 mod state;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use state::{setup_db, Stat, State};
 
 struct Logger {}
@@ -88,19 +85,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             start_time: std::time::SystemTime::now(),
         },
     });
-    let addr = state.config.bind.parse().expect("Bad bind address");
-    let bind = state.config.bind.clone();
+    let addr: std::net::SocketAddr = state.config.bind.parse().expect("Bad bind address");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    let service = make_service_fn(move |_| {
-        let state = state.clone();
-        async { Ok::<_, Error>(service_fn(move |req| backup_serve(req, state.clone()))) }
-    });
-
-    let server = Server::bind(&addr).serve(service);
-    info!("Server listening on {}", &bind);
+    info!("Server listening on {}", &state.config.bind);
     info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
     sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).unwrap();
-    server.await?;
 
-    Ok(())
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            // Finally, we bind the incoming connection to our `hello` service
+            if let Err(err) = hyper::server::conn::http1::Builder::new()
+                // `service_fn` converts our function in a `Service`
+                .serve_connection(
+                    io,
+                    service_fn(move |request| backup_serve(request, state.clone())),
+                )
+                .await
+            {
+                eprintln!("Error serving connection: {:?}", err);
+            }
+        });
+    }
 }

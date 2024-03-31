@@ -1,4 +1,5 @@
-use hyper::{Body, Response};
+use http_body_util::Full;
+use hyper::{body::Bytes, Response};
 
 #[derive(Debug)]
 pub enum Error {
@@ -34,4 +35,4 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The main result type used throughout
-pub type ResponseFuture = Result<Response<Body>>;
+pub type ResponseFuture = Result<Response<Full<Bytes>>>;

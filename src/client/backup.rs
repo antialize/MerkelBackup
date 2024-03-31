@@ -434,7 +434,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         secrets,
         config,
         client: reqwest::blocking::ClientBuilder::new()
-            .timeout(Duration::from_secs(60*4)) // Increase timout from default 30 seconds to 5 minutes
+            .timeout(Duration::from_secs(60 * 4)) // Increase timout from default 30 seconds to 5 minutes
             .no_brotli()
             .no_deflate()
             .no_gzip()
