@@ -127,6 +127,7 @@ pub enum Error {
     Toml(toml::de::Error),
     Nix(nix::Error),
     Lzma(lzma::LzmaError),
+    #[allow(clippy::enum_variant_names)]
     StreamCipherError(cipher::StreamCipherError),
 }
 
@@ -196,25 +197,20 @@ where
 {
     for sleep in [5, 20, 60, 120, 240, 280].iter() {
         let sleep = match f() {
-            Ok(res) => {
-                match res.status() {
-                    reqwest::StatusCode::REQUEST_TIMEOUT
-                    | reqwest::StatusCode::GATEWAY_TIMEOUT => {
-                        warn!("Request timeout, retrying {}", res.status());
-                        u64::max(*sleep, 2*60)
-                    }
-                    reqwest::StatusCode::TOO_MANY_REQUESTS
-                        | reqwest::StatusCode::INTERNAL_SERVER_ERROR
-                        | reqwest::StatusCode::BAD_GATEWAY
-                        | reqwest::StatusCode::SERVICE_UNAVAILABLE => {
-                        warn!("Request failed, retrying {}", res.status());
-                        *sleep
-                    }
-                    _ => {
-                        return Ok(res)
-                    }
+            Ok(res) => match res.status() {
+                reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::GATEWAY_TIMEOUT => {
+                    warn!("Request timeout, retrying {}", res.status());
+                    u64::max(*sleep, 2 * 60)
                 }
-            }
+                reqwest::StatusCode::TOO_MANY_REQUESTS
+                | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                | reqwest::StatusCode::BAD_GATEWAY
+                | reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    warn!("Request failed, retrying {}", res.status());
+                    *sleep
+                }
+                _ => return Ok(res),
+            },
             Err(e) => {
                 if e.is_timeout() {
                     debug!("Request failed, retrying {:?}", e)

@@ -2,7 +2,7 @@ use crate::shared::{check_response, Config, EType, Error, Level, Secrets};
 use crate::RestoreCommand;
 use blake2::Digest;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chrono::NaiveDateTime;
+use chrono::DateTime;
 use log::{debug, error, info};
 use pbr::ProgressBar;
 use std::collections::{HashMap, HashSet};
@@ -224,7 +224,7 @@ fn recover_entry(
                 &dpath,
                 Some(nix::unistd::Uid::from_raw(ent.uid)),
                 Some(nix::unistd::Gid::from_raw(ent.gid)),
-                nix::unistd::FchownatFlags::NoFollowSymlink,
+                nix::unistd::FchownatFlags::AT_SYMLINK_NOFOLLOW,
             )?;
         }
         nix::sys::stat::lutimes(
@@ -275,7 +275,7 @@ impl<'l> Iterator for RootsIter<'l> {
                 Err(e) => return Some(Err(e)),
                 Ok(root) => {
                     if let Some(filter) = self.filter {
-                        let root_time = match NaiveDateTime::from_timestamp_opt(root.time, 0) {
+                        let root_time = match DateTime::from_timestamp(root.time, 0) {
                             Some(v) => v,
                             None => return Some(Err(Error::Msg("Invalid time"))),
                         };
@@ -508,7 +508,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
         }
         let time_str = std::format!(
             "{}",
-            NaiveDateTime::from_timestamp_opt(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+            DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
         );
         let usage_str = std::format!("{}", Size::from(total_size - old_total_size));
         let size_str = std::format!("{}", Size::from(size));
@@ -578,7 +578,7 @@ fn find_entries2<
         info!(
             "Visiting root {} {}",
             root.host,
-            NaiveDateTime::from_timestamp_opt(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+            DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
         );
 
         let v = match get_root(client, config, secrets, root.hash) {
@@ -822,8 +822,7 @@ pub fn run_prune(
                 info!(
                     "Removing root {} {}",
                     root.host,
-                    NaiveDateTime::from_timestamp_opt(root.time, 0)
-                        .ok_or(Error::Msg("Invalid time"))?
+                    DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
                 );
                 if !dry {
                     let url = format!(

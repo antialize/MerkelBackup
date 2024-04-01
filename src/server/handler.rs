@@ -1,6 +1,8 @@
 use base64::Engine;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
 use hyper::header::CONTENT_LENGTH;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -9,7 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
 use crate::state::State;
-use hyper::body::HttpBody;
 
 /// Print an error to the terminal and return a future describing the error
 fn handle_error<E: std::fmt::Debug>(
@@ -24,7 +25,7 @@ fn handle_error<E: std::fmt::Debug>(
     //}
     Ok(Response::builder()
         .status(code)
-        .body(Body::from(message))
+        .body(Full::from(message))
         .unwrap())
 }
 
@@ -49,8 +50,8 @@ fn ok_message(message: Option<String>) -> ResponseFuture {
     Ok(Response::builder()
         .status(StatusCode::OK)
         .body(match message {
-            Some(message) => Body::from(message),
-            None => Body::from(""),
+            Some(message) => Full::from(message),
+            None => Full::from(""),
         })
         .unwrap())
 }
@@ -63,7 +64,7 @@ fn unauthorized_message() -> ResponseFuture {
             "WWW-Authenticate",
             "Basic realm=\"mbackup\", charset=\"UTF-8\"",
         )
-        .body(Body::from(""))
+        .body(Full::from(""))
         .unwrap())
 }
 
@@ -71,7 +72,7 @@ fn unauthorized_message() -> ResponseFuture {
 /// If he does None is returned
 /// Otherwise Some(unauthorized_message()) is returned
 fn check_auth<'a>(
-    req: &Request<Body>,
+    req: &Request<Incoming>,
     state: &'a State,
     level: AccessType,
 ) -> std::result::Result<&'a crate::config::User, ResponseFuture> {
@@ -137,7 +138,7 @@ fn chunk_path(data_dir: &str, bucket: &str, chunk: &str) -> String {
 async fn handle_put_chunk(
     bucket: String,
     chunk: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
@@ -168,8 +169,12 @@ async fn handle_put_chunk(
 
     let mut v = Vec::new();
     let mut body = req.into_body();
-    while let Some(chunk) = body.data().await {
-        v.extend_from_slice(&chunk?);
+    while let Some(chunk) = body.frame().await {
+        let chunk = match chunk?.into_data() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        v.extend_from_slice(&chunk);
         if v.len() > 1024 * 1024 * 1024 {
             return handle_error!(StatusCode::BAD_REQUEST, "Content too large", "");
         }
@@ -264,7 +269,7 @@ fn do_check_chunk_exists(
 async fn handle_get_chunk(
     bucket: String,
     chunk: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
     head: bool,
 ) -> ResponseFuture {
@@ -314,7 +319,7 @@ async fn handle_get_chunk(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, size)
-            .body(Body::from(""))
+            .body(Full::from(""))
             .unwrap());
     }
     let content = match content {
@@ -339,7 +344,7 @@ async fn handle_get_chunk(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_LENGTH, size)
-        .body(Body::from(content))
+        .body(Full::from(content))
         .unwrap())
 }
 
@@ -447,7 +452,7 @@ fn do_delete_chunks(
 async fn handle_delete_chunk(
     bucket: String,
     chunk: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
@@ -487,7 +492,7 @@ async fn handle_delete_chunk(
 
 async fn handle_delete_chunks(
     bucket: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
@@ -505,8 +510,11 @@ async fn handle_delete_chunks(
     let mut v = Vec::new();
     let mut body = req.into_body();
 
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk?;
+    while let Some(frame) = body.frame().await {
+        let chunk = match frame?.into_data() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         v.extend_from_slice(&chunk);
         if v.len() >= 1024 * 1024 * 256 {
             return handle_error!(StatusCode::BAD_REQUEST, "Too much data", "");
@@ -537,7 +545,7 @@ async fn handle_delete_chunks(
 
 async fn handle_list_chunks(
     bucket: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     let validate = req.uri().query().map_or(false, |q| q.contains("validate"));
@@ -636,7 +644,7 @@ fn do_list_chunks(
 
 async fn handle_get_status(
     bucket: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
@@ -668,7 +676,11 @@ fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
     }
 }
 
-async fn handle_get_roots(bucket: String, req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+async fn handle_get_roots(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
     let earliest_root = match check_auth(&req, &state, AccessType::Get) {
         Err(res) => {
             warn!("Unauthorized access for get roots {}", bucket);
@@ -726,7 +738,7 @@ fn do_get_roots(
 async fn handle_put_root(
     bucket: String,
     host: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
@@ -748,8 +760,11 @@ async fn handle_put_root(
 
     let mut body = req.into_body();
     let mut v = Vec::new();
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk?;
+    while let Some(chunk) = body.frame().await {
+        let chunk = match chunk?.into_data() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         v.extend_from_slice(&chunk);
         if v.len() > 1024 * 1024 * 10 {
             return handle_error!(StatusCode::BAD_REQUEST, "Content too long", "");
@@ -780,7 +795,7 @@ async fn handle_put_root(
 async fn handle_delete_root(
     bucket: String,
     root: String,
-    req: Request<Body>,
+    req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
@@ -806,7 +821,7 @@ async fn handle_delete_root(
     }
 }
 
-async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
     if let Some(token) = &state.config.metrics_token {
         if req.uri().query() != Some(token.as_str()) {
             return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
@@ -912,7 +927,7 @@ async fn handle_get_metrics(req: Request<Body>, state: Arc<State>) -> ResponseFu
     ok_message(Some(ans))
 }
 
-async fn handle_get_mirror(_req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+async fn handle_get_mirror(_req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
     let mut bit: u8 = 1;
     let mut val: u8 = 0;
     let mut nid: i64 = 0;
@@ -943,7 +958,7 @@ async fn handle_get_mirror(_req: Request<Body>, state: Arc<State>) -> ResponseFu
     ok_message(None)
 }
 
-pub async fn backup_serve(req: Request<Body>, state: Arc<State>) -> ResponseFuture {
+pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req
         .uri()
         .path()
