@@ -23,7 +23,7 @@ path = "src/offline_validate.rs"
 
 [dependencies]
 log = "0.4"
-rusqlite = {version = "0.31", features = ["bundled"] }
+rusqlite = {version = "0.32", features = ["bundled"] }
 rand = "0.8"
 reqwest = {version = "0.12", features=["blocking", "rustls-tls"], default-features=false}
 hex = "0.4"
@@ -33,16 +33,17 @@ serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 base64 = "0.22"
 pbr = "1.0"
-nix = { version = "0.28", features = ["user", "fs"],  default-features=false }
+nix = { version = "0.29", features = ["user", "fs"],  default-features=false }
 libc = "0.2"
 rust-lzma = "0.6"
-itertools = "0.12"
-hyper = {version="1.2", features =["http1", "server"] }
+itertools = "0.13"
+hyper = {version="1.4", features =["http1", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
 sd-notify = "0.4"
 blake2 = "0.10"
 chacha20 = "0.9"
 digest = "0.10"
 cipher = "0.4"
-http-body-util = "0.1.1"
-hyper-util = "0.1.3"
+http-body-util = "0.1"
+hyper-util = "0.1"
+thiserror = "1.0.64"

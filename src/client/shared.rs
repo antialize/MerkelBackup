@@ -1,5 +1,6 @@
 use log::{debug, warn};
 use serde::Deserialize;
+use thiserror::Error;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EType {
@@ -110,84 +111,43 @@ pub struct Secrets {
     pub key: [u8; 32],
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
-    Sql(rusqlite::Error),
+    #[error("sql")]
+    Sql(#[from] rusqlite::Error),
+    #[error("missing row")]
     MissingRow(),
-    Reqwest(reqwest::Error),
+    #[error("reqwest")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("http status")]
     HttpStatus(reqwest::StatusCode),
+    #[error("bath path {0}")]
     BadPath(std::path::PathBuf),
-    Io(std::io::Error),
-
-    ParseInt(std::num::ParseIntError),
+    #[error("io error")]
+    Io(#[from] std::io::Error),
+    #[error("parse int")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("invalid hash")]
     InvalidHash(),
-    Utf8(std::string::FromUtf8Error),
-    Time(std::time::SystemTimeError),
+    #[error("utf8")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("time")]
+    Time(#[from] std::time::SystemTimeError),
+    #[error("msg {0}")]
     Msg(&'static str),
-    Toml(toml::de::Error),
-    Nix(nix::Error),
-    Lzma(lzma::LzmaError),
-    #[allow(clippy::enum_variant_names)]
-    StreamCipherError(cipher::StreamCipherError),
-}
-
-impl From<rusqlite::Error> for Error {
-    fn from(error: rusqlite::Error) -> Self {
-        Error::Sql(error)
-    }
-}
-
-impl From<reqwest::Error> for Error {
-    fn from(error: reqwest::Error) -> Self {
-        Error::Reqwest(error)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Error::Io(error)
-    }
-}
-
-impl From<std::num::ParseIntError> for Error {
-    fn from(error: std::num::ParseIntError) -> Self {
-        Error::ParseInt(error)
-    }
-}
-
-impl From<std::string::FromUtf8Error> for Error {
-    fn from(error: std::string::FromUtf8Error) -> Self {
-        Error::Utf8(error)
-    }
-}
-
-impl From<std::time::SystemTimeError> for Error {
-    fn from(error: std::time::SystemTimeError) -> Self {
-        Error::Time(error)
-    }
-}
-
-impl From<toml::de::Error> for Error {
-    fn from(error: toml::de::Error) -> Self {
-        Error::Toml(error)
-    }
-}
-
-impl From<nix::Error> for Error {
-    fn from(error: nix::Error) -> Self {
-        Error::Nix(error)
-    }
-}
-
-impl From<lzma::LzmaError> for Error {
-    fn from(error: lzma::LzmaError) -> Self {
-        Error::Lzma(error)
-    }
+    #[error("toml")]
+    Toml(#[from] toml::de::Error),
+    #[error("nix")]
+    Nix(#[from] nix::Error),
+    #[error("lzma")]
+    Lzma(#[from] lzma::LzmaError),
+    #[error("stream cipher error {0}")]
+    StreamCipher(cipher::StreamCipherError),
 }
 
 impl From<cipher::StreamCipherError> for Error {
     fn from(error: cipher::StreamCipherError) -> Self {
-        Error::StreamCipherError(error)
+        Error::StreamCipher(error)
     }
 }
 
