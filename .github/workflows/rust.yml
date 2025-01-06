@@ -8,9 +8,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --verbose
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+    - name: Deps
+      run: DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends liblzma-dev
+    - name: Check
+      run: cargo check --verbose
     - name: Run tests
       run: cargo test --verbose
     - name: Format
