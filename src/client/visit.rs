@@ -300,7 +300,7 @@ pub struct Roots<'l> {
     filter: Option<&'l str>,
 }
 
-impl<'l> Roots<'l> {
+impl Roots<'_> {
     pub fn iter(&self) -> RootsIter {
         RootsIter {
             rows: self.text.split("\0\0"),

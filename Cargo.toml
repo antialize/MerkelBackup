@@ -21,6 +21,10 @@ path = "src/dummy_server.rs"
 name = "offline_validate"
 path = "src/offline_validate.rs"
 
+[[bin]]
+name = "migrate"
+path = "src/migrate.rs"
+
 [dependencies]
 log = "0.4"
 rusqlite = {version = "0.32", features = ["bundled"] }
@@ -36,7 +40,7 @@ pbr = "1.0"
 nix = { version = "0.29", features = ["user", "fs"],  default-features=false }
 libc = "0.2"
 rust-lzma = "0.6"
-itertools = "0.13"
+itertools = "0.14"
 hyper = {version="1", features =["http1", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
 sd-notify = "0.4"

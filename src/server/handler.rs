@@ -183,73 +183,51 @@ async fn handle_put_chunk(
     let len = v.len();
     state.stat.put_chunk_bytes.add(len);
 
-    // Small content is stored directly in the DB
-    if len < SMALL_SIZE {
+    // Small content is stored on the ssd
+    let (data_dir, small) = if len < SMALL_SIZE {
         state.stat.put_chunk_small.inc();
-        let conn = state.conn.lock().unwrap();
-        tryfut!(
-            conn.execute(
-                "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
-                params![&bucket, &chunk, v.len() as i64],
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Insert failed",
-        );
-        let id = conn.last_insert_rowid();
-        tryfut!(
-            conn.execute(
-                "INSERT INTO chunk_content (chunk_id, content) VALUES (?, ?)",
-                params![id, &v],
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Insert failed",
-        );
+        (&state.config.ssd_data_dir, true)
     } else {
         state.stat.put_chunk_large.inc();
-        // Large content is stored on disk. We first store the data in a temp upload folder
-        // and then atomically rename into its right location
-        tryfut!(
-            std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create upload folder"
-        );
-        let temp_path = format!(
-            "{}/data/upload/{}/{}_{}",
-            state.config.data_dir,
-            bucket,
-            chunk,
-            rand::random::<u64>()
-        );
-        tryfut!(
-            std::fs::write(&temp_path, v),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Write failed"
-        );
-        tryfut!(
-            std::fs::create_dir_all(format!(
-                "{}/data/{}/{}",
-                state.config.data_dir,
-                &bucket,
-                &chunk[..2]
-            )),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create bucket folder"
-        );
-        {
-            let conn = state.conn.lock().unwrap();
-            tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
-                params![&bucket, &chunk, len as i64]),
-                StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
-        }
-        tryfut!(
-            std::fs::rename(
-                &temp_path,
-                chunk_path(&state.config.data_dir, &bucket, &chunk)
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Move failed"
-        );
+        (&state.config.hdd_data_dir, false)
+    };
+
+    // We first store the data in a temp upload folder
+    // and then atomically rename into its right location
+    tryfut!(
+        std::fs::create_dir_all(format!("{}/data/upload/{}", data_dir, &bucket)),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Could not create upload folder"
+    );
+    let temp_path = format!(
+        "{}/data/upload/{}/{}_{}",
+        data_dir,
+        bucket,
+        chunk,
+        rand::random::<u64>()
+    );
+    tryfut!(
+        std::fs::write(&temp_path, v),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Write failed"
+    );
+    tryfut!(
+        std::fs::create_dir_all(format!("{}/data/{}/{}", data_dir, &bucket, &chunk[..2])),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Could not create bucket folder"
+    );
+    {
+        let conn = state.conn.lock().unwrap();
+        tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), ?)",
+            params![&bucket, &chunk, len as i64, small]),
+            StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
     }
+    tryfut!(
+        std::fs::rename(&temp_path, chunk_path(data_dir, &bucket, &chunk)),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Move failed"
+    );
+
     info!("{}:{}: put chunk {} success", file!(), line!(), chunk);
 
     ok_message(None)
@@ -297,8 +275,8 @@ async fn handle_get_chunk(
         "Bad chunk"
     );
 
-    let (content, size) = match tryfut!(
-        do_get_chunk(&mut state.conn.lock().unwrap(), &bucket, &chunk, head),
+    let (_id, ssd, size) = match tryfut!(
+        do_get_chunk(&mut state.conn.lock().unwrap(), &bucket, &chunk),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error"
     ) {
@@ -322,23 +300,21 @@ async fn handle_get_chunk(
             .body(Full::from(""))
             .unwrap());
     }
-    let content = match content {
-        Some(content) => {
-            state.stat.get_chunk_small.inc();
-            content
-        }
-        None => {
-            state.stat.get_chunk_large.inc();
-            let path = chunk_path(&state.config.data_dir, &bucket, &chunk);
-            match std::fs::read(path) {
-                //TODO use tokio for async fileread
-                Ok(data) => data,
-                Err(e) => {
-                    return handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing", e)
-                }
-            }
-        }
+    let data_dir = if ssd {
+        state.stat.get_chunk_small.inc();
+        &state.config.ssd_data_dir
+    } else {
+        state.stat.get_chunk_large.inc();
+        &state.config.hdd_data_dir
     };
+
+    let path = chunk_path(data_dir, &bucket, &chunk);
+    let content = match std::fs::read(path) {
+        //TODO use tokio for async fileread
+        Ok(data) => data,
+        Err(e) => return handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing", e),
+    };
+
     state.stat.get_chunk_bytes.add(size as usize);
     info!("{}:{}: get chunk {} success", file!(), line!(), chunk);
     Ok(Response::builder()
@@ -352,38 +328,20 @@ fn do_get_chunk(
     conn: &mut rusqlite::Connection,
     bucket: &str,
     chunk: &str,
-    head: bool,
-) -> Result<Option<(Option<Vec<u8>>, i64)>> {
+) -> Result<Option<(i64, bool, i64)>> {
     let mut stmt =
         conn.prepare("SELECT id, has_content, size FROM chunks WHERE bucket=? AND hash=?")?;
 
     let mut rows = stmt.query(params![bucket, chunk])?;
-    let (_id, content, size) = match rows.next()? {
+    match rows.next()? {
         Some(row) => {
             let id: i64 = row.get(0)?;
-            // TODO(rav): Make has_content NOT NULL in the database
-            let has_content: Option<bool> = row.get(1)?;
-            let has_content = has_content == Some(true);
+            let ssd: bool = row.get(1)?;
             let size: i64 = row.get(2)?;
-            if !head && has_content {
-                let mut stmt =
-                    conn.prepare("SELECT content FROM chunk_content WHERE chunk_id = ?")?;
-                let mut rows = stmt.query(params![id])?;
-                match rows.next()? {
-                    Some(v) => (id, v.get(0)?, size),
-                    None => {
-                        return Ok(None);
-                    }
-                }
-            } else {
-                (id, None, size)
-            }
+            Ok(Some((id, ssd, size)))
         }
-        None => {
-            return Ok(None);
-        }
-    };
-    Ok(Some((content, size)))
+        None => Ok(None),
+    }
 }
 
 fn do_delete_chunks(
@@ -401,37 +359,25 @@ fn do_delete_chunks(
         params.push(chunk)
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
+        "SELECT hash, ssd FROM chunks WHERE bucket=? AND hash IN (?{})",
         ", ?".repeat(chunks.len() - 1)
     ))?;
 
-    let mut internal_chunks = Vec::new();
     for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        Ok((row.get(0)?, row.get(1)?))
     })? {
-        // TODO(rav): Make has_content NOT NULL in the database
-        let (id, chunk, has_content): (usize, String, Option<bool>) = row?;
-        let has_content = has_content == Some(true);
-        if has_content {
-            internal_chunks.push(id);
+        let (chunk, ssd): (String, bool) = row?;
+        let data_dir = if ssd {
+            &config.ssd_data_dir
         } else {
-            let path = chunk_path(&config.data_dir, &bucket, &chunk);
-            match std::fs::remove_file(path) {
-                Ok(_) => (),
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => return Err(Error::Server("Delete failed")),
-            }
+            &config.hdd_data_dir
+        };
+        let path = chunk_path(data_dir, &bucket, &chunk);
+        match std::fs::remove_file(path) {
+            Ok(_) => (),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err(Error::Server("Delete failed")),
         }
-    }
-
-    if !internal_chunks.is_empty() {
-        conn.execute(
-            &format!(
-                "DELETE FROM chunk_content WHERE chunk_id IN (?{})",
-                ", ?".repeat(internal_chunks.len() - 1)
-            ),
-            rusqlite::params_from_iter(internal_chunks.iter()),
-        )?;
     }
 
     let count = conn.execute(
@@ -605,7 +551,7 @@ fn do_list_chunks(
     // let rows = stmt.query_map(params![bucket], |row| {
     //     Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
     // })?;
-    let mut stmt = conn.prepare("SELECT hash, size, has_content, bucket FROM chunks")?;
+    let mut stmt = conn.prepare("SELECT hash, size, ssd, bucket FROM chunks")?;
     let rows = stmt.query_map(params![], |row| {
         let b: String = row.get(3)?;
         if b == bucket {
@@ -616,23 +562,22 @@ fn do_list_chunks(
     })?;
 
     for row in rows {
-        // TODO(rav): Make has_content NOT NULL in the database
-        let (chunk, size, has_content): (String, i64, Option<bool>) = match row? {
+        let (chunk, size, ssd): (String, i64, bool) = match row? {
             Some(row) => row,
             None => continue,
         };
-        let has_content = has_content == Some(true);
         if validate {
-            let content_size = if has_content {
-                // TODO(rav): Join with content table
-                size
+            let data_dir = if ssd {
+                &config.ssd_data_dir
             } else {
-                let path = chunk_path(&config.data_dir, bucket, &chunk);
-                match std::fs::metadata(path) {
-                    Ok(md) => md.len() as i64,
-                    Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
-                    Err(_) => return Err(Error::Server("Unable to access metadata")),
-                }
+                &config.hdd_data_dir
+            };
+
+            let path = chunk_path(data_dir, bucket, &chunk);
+            let content_size = match std::fs::metadata(path) {
+                Ok(md) => md.len() as i64,
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => -1,
+                Err(_) => return Err(Error::Server("Unable to access metadata")),
             };
             writeln!(ans, "{chunk} {size} {content_size}").unwrap();
         } else {

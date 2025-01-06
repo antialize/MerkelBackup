@@ -55,7 +55,7 @@ pub struct State {
 
 pub fn setup_db(conf: &Config) -> Connection {
     trace!("opening database");
-    let conn = Connection::open(format!("{}/backup.db", conf.data_dir))
+    let conn = Connection::open(format!("{}/backup.db", conf.ssd_data_dir))
         .expect("Unable to open hash cache");
 
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -65,16 +65,16 @@ pub fn setup_db(conf: &Config) -> Connection {
     // The chunks table contains metadata for all chunks
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chunks (
-             id INTEGER PRIMARY KEY,
-             bucket TEXT NOT NULL,
-             hash TEXT NOT NULL,
-             size INTEGER NOT NULL,
-             time INTEGER NOT NULL,
-             has_content BOOLEAN NOT NULL
-             )",
+            id INTEGER PRIMARY KEY NOT NULL,
+            bucket TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            time INTEGER NOT NULL,
+            ssd INTEGER NOT NULL
+            ) STRICT",
         [],
     )
-    .expect("Unable to create cache table");
+    .expect("Unable to create chunks table");
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bucket_hash
@@ -83,39 +83,29 @@ pub fn setup_db(conf: &Config) -> Connection {
     )
     .expect("Unable to create cache table index");
 
-    // The chunk_content table contains data for small chunks
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS chunk_content (
-             chunk_id INTEGER PRIMARY KEY,
-             content BLOB
-             )",
-        [],
-    )
-    .expect("Unable to create cache table");
-
     trace!("Creating roots table");
     // The roots table records the root of the merkel tree of all backups
     conn.execute(
         "CREATE TABLE IF NOT EXISTS roots (
-             id INTEGER PRIMARY KEY,
-             bucket TEXT NOT NULL,
-             host TEXT NOT NULL,
-             time INTEGER NOT NULL,
-             hash TEXT NOT NULL
-             )",
+            id INTEGER PRIMARY KEY NOT NULL,
+            bucket TEXT NOT NULL,
+            host TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            hash TEXT NOT NULL
+            ) STRICT",
         [],
     )
-    .expect("Unable to create cache table");
+    .expect("Unable to create roots table");
 
     trace!("Creating deletes table");
     conn.execute(
         "CREATE TABLE IF NOT EXISTS deletes (
-             bucket TEXT NOT NULL UNIQUE,
-             time INTEGER NOT NULL
-             )",
+            bucket TEXT NOT NULL UNIQUE,
+            time INTEGER NOT NULL
+            ) STRICT",
         [],
     )
-    .expect("Unable to deletes cache table");
+    .expect("Unable to create deletes table");
 
     conn
 }
