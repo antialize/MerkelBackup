@@ -1,8 +1,8 @@
 use clap::Parser;
 use serde::Deserialize;
 
-/// Chunks smaller that this goes into the sqlite database instead of directly on disk
-pub const SMALL_SIZE: usize = 1024 * 8;
+/// Chunks smaller that this goes into the ssd instead of the hdd
+pub const SMALL_SIZE: usize = 1024 * 64;
 
 /// The access level required, Put is the minimal, Delete is the maximal
 #[derive(Deserialize, PartialEq, Debug)]
@@ -67,7 +67,8 @@ impl From<Level> for log::LevelFilter {
 pub struct Config {
     pub verbosity: Level,
     pub bind: String,
-    pub data_dir: String,
+    pub hdd_data_dir: String,
+    pub ssd_data_dir: String,
     pub users: Vec<User>,
     pub metrics_token: Option<String>,
 }
@@ -78,7 +79,8 @@ impl Default for Config {
         Config {
             verbosity: Level::Info,
             bind: "0.0.0.0:3321".to_string(),
-            data_dir: ".".to_string(),
+            hdd_data_dir: ".".to_string(),
+            ssd_data_dir: ".".to_string(),
             users: Vec::new(),
             metrics_token: std::env::var("METRICS_TOKEN").ok(),
         }
@@ -97,8 +99,12 @@ struct Args {
     bind: Option<String>,
 
     /// Where do we store data
-    #[clap(long = "data-dir")]
-    data_dir: Option<String>,
+    #[clap(long = "hdd-data-dir")]
+    hdd_data_dir: Option<String>,
+
+    /// Where do we store data
+    #[clap(long = "ssd-data-dir")]
+    ssd_data_dir: Option<String>,
 
     /// Path to config file
     #[clap(short, long)]
@@ -134,8 +140,11 @@ pub fn parse_config() -> Config {
     if let Some(bind) = args.bind {
         config.bind = bind;
     }
-    if let Some(dir) = args.data_dir {
-        config.data_dir = dir;
+    if let Some(dir) = args.hdd_data_dir {
+        config.hdd_data_dir = dir;
+    }
+    if let Some(dir) = args.ssd_data_dir {
+        config.ssd_data_dir = dir;
     }
 
     config
