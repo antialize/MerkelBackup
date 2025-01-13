@@ -548,7 +548,7 @@ async fn handle_list_chunks(
     req: Request<Incoming>,
     state: Arc<State>,
 ) -> ResponseFuture {
-    let validate = req.uri().query().map_or(false, |q| q.contains("validate"));
+    let validate = req.uri().query().is_some_and(|q| q.contains("validate"));
 
     match check_auth(
         &req,
