@@ -21,6 +21,12 @@ path = "src/dummy_server.rs"
 name = "offline_validate"
 path = "src/offline_validate.rs"
 
+
+[[bin]]
+name = "mbackup_flush_db"
+path = "src/flush_db.rs"
+
+
 [dependencies]
 log = "0.4"
 rusqlite = {version = "0.32", features = ["bundled"] }
