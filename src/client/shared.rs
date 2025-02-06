@@ -143,6 +143,8 @@ pub enum Error {
     Lzma(#[from] lzma::LzmaError),
     #[error("stream cipher error {0}")]
     StreamCipher(cipher::StreamCipherError),
+    #[error("os_random_error {0}")]
+    OsRandom(rand_core::OsError),
 }
 
 impl From<cipher::StreamCipherError> for Error {
@@ -150,6 +152,13 @@ impl From<cipher::StreamCipherError> for Error {
         Error::StreamCipher(error)
     }
 }
+
+impl From<rand_core::OsError> for Error {
+    fn from(error: rand_core::OsError) -> Self {
+        Error::OsRandom(error)
+    }
+}
+
 
 pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error>
 where

@@ -3,6 +3,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Method, Request, Response, StatusCode};
+use rand_core::{OsRng, TryRngCore};
 use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -218,7 +219,7 @@ async fn handle_put_chunk(
             state.config.data_dir,
             bucket,
             chunk,
-            rand::random::<u64>()
+            OsRng.try_next_u64()?
         );
         tryfut!(
             std::fs::write(&temp_path, v),

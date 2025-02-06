@@ -3,7 +3,6 @@
 
 extern crate clap;
 extern crate hyper;
-extern crate rand;
 extern crate rusqlite;
 extern crate serde;
 extern crate tokio;

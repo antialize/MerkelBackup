@@ -13,7 +13,7 @@ use log::debug;
 use log::error;
 use log::info;
 use pbr::ProgressBar;
-use rand::Rng;
+use rand_core::TryRngCore;
 use rusqlite::{params, Connection, Statement};
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
@@ -42,7 +42,7 @@ struct State<'a> {
     update_remote_stmt: Statement<'a>,
     get_chunks_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
-    rng: rand::rngs::OsRng,
+    rng: rand_core::OsRng,
     entries: Vec<DirEnt>,
     modified_files_count: u64,
     transfered_bytes: usize,
@@ -114,7 +114,8 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         );
 
         let mut crypted = vec![0; content.len() + 12];
-        state.rng.fill(&mut crypted[..12]);
+        state.rng.try_fill_bytes(&mut crypted[..12])?;
+
         let nonce: [u8; 12] = crypted[..12].try_into().unwrap();
         chacha20::ChaCha20::new(&state.secrets.key.into(), &nonce.into())
             .apply_keystream_b2b(content, &mut crypted[12..])?;
@@ -447,7 +448,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
-        rng: rand::rngs::OsRng,
+        rng: rand_core::OsRng,
         entries: Vec::new(),
         modified_files_count: 0,
         transfered_bytes: 0,

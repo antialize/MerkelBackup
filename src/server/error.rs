@@ -5,6 +5,7 @@ use hyper::{body::Bytes, Response};
 pub enum Error {
     Hyper(hyper::Error),
     Rusqlite(rusqlite::Error),
+    OsRandom(rand_core::OsError),
     Server(&'static str),
 }
 
@@ -20,11 +21,17 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
+impl From<rand_core::OsError> for Error {
+    fn from(error: rand_core::OsError) -> Self {
+        Error::OsRandom(error)
+    }
+}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
             Error::Hyper(ref e) => write!(f, "{e}"),
             Error::Rusqlite(ref e) => write!(f, "{e}"),
+            Error::OsRandom(ref e) => write!(f, "{e}"),
             Error::Server(s) => write!(f, "{s}"),
         }
     }
