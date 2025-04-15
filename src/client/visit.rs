@@ -478,7 +478,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
     for root in root_vec.iter().rev() {
         let v = match get_root(&mut client, &config, &secrets, root.hash) {
             Err(e) => {
-                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                error!("Bad root {}: {:?}", root.hash, e);
                 continue;
             }
             Ok(v) => v,
@@ -528,7 +528,7 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
         let root = root?;
         let v = match get_root(&mut client, &config, &secrets, root.hash) {
             Err(e) => {
-                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                error!("Bad root {}: {:?}", root.hash, e);
                 continue;
             }
             Ok(v) => v,
@@ -583,7 +583,7 @@ fn find_entries2<
 
         let v = match get_root(client, config, secrets, root.hash) {
             Err(e) => {
-                error!("Bad root {}: {:?}", root.hash.to_string(), e);
+                error!("Bad root {}: {:?}", root.hash, e);
                 ok = false;
                 continue;
             }
