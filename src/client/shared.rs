@@ -159,7 +159,6 @@ impl From<rand_core::OsError> for Error {
     }
 }
 
-
 pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error>
 where
     F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
