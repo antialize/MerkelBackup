@@ -220,7 +220,7 @@ fn recover_entry(
         std::fs::set_permissions(&dpath, std::fs::Permissions::from_mode(ent.st_mode))?;
         if preserve_owner {
             nix::unistd::fchownat(
-                None,
+                nix::fcntl::AT_FDCWD,
                 &dpath,
                 Some(nix::unistd::Uid::from_raw(ent.uid)),
                 Some(nix::unistd::Gid::from_raw(ent.gid)),
