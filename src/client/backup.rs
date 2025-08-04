@@ -168,7 +168,10 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         .to_str()
         .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
-        let start = i64::max(0, path_str.len() as i64 - 40) as usize;
+        let mut start = i64::max(0, path_str.len() as i64 - 40) as usize;
+        while !path_str.is_char_boundary(start) {
+            start -= 1;
+        }
         p.message(&format!("{} ", &path_str[start..]));
     }
 
