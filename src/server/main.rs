@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_config();
     log::set_max_level(config.verbosity.into());
 
-    debug!("Config {:?}", config);
+    debug!("Config {config:?}");
     let conn = Mutex::new(setup_db(&config));
     let state = Arc::new(State {
         config,
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 )
                 .await
             {
-                eprintln!("Error serving connection: {:?}", err);
+                eprintln!("Error serving connection: {err:?}");
             }
         });
     }

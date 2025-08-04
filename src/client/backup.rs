@@ -254,7 +254,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     let raw_entries = match fs::read_dir(dir) {
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
-            error!("Unable to backup folder {:?}: {:?}\n", dir, e);
+            error!("Unable to backup folder {dir:?}: {e:?}\n");
             return Ok(());
         }
         Ok(v) => v,
@@ -264,7 +264,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
         let md = match fs::symlink_metadata(&path) {
             Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                error!("Unable to backup entry {:?}: {:?}\n", path, e);
+                error!("Unable to backup entry {path:?}: {e:?}\n");
                 continue;
             }
             Ok(v) => v,
@@ -327,7 +327,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             let link = match fs::read_link(&path) {
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    error!("Unable to backup link {:?}: {:?}\n", path, e);
+                    error!("Unable to backup link {path:?}: {e:?}\n");
                     continue;
                 }
                 Ok(v) => v,
@@ -401,7 +401,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         state.update_remote_stmt.execute(params![chunk])?;
         cnt += 1;
     }
-    info!("Prune detected. {} objects reloaded from remote state", cnt);
+    info!("Prune detected. {cnt} objects reloaded from remote state");
     Ok(())
 }
 

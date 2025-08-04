@@ -182,7 +182,7 @@ fn recover_entry(
     match ent.etype {
         EType::Root => (),
         EType::Dir => {
-            debug!("DIR {:?}", dpath);
+            debug!("DIR {dpath:?}");
             if !dry {
                 std::fs::create_dir_all(&dpath)?;
             }
@@ -191,7 +191,7 @@ fn recover_entry(
             }
         }
         EType::Link => {
-            debug!("LINK {:?}", dpath);
+            debug!("LINK {dpath:?}");
             if !dry {
                 std::os::unix::fs::symlink(ent.chunks.first().unwrap(), &dpath)?;
             }
@@ -200,7 +200,7 @@ fn recover_entry(
             }
         }
         EType::File => {
-            debug!("FILE {:?}", dpath);
+            debug!("FILE {dpath:?}");
             if !dry {
                 let mut file = std::fs::File::create(&dpath)?;
                 for chunk in ent.chunks.iter() {
@@ -365,10 +365,7 @@ fn full_validate(
         match get_chunk(client, config, secrets, hash) {
             Err(e) => {
                 bad_files += 1;
-                error!(
-                    "Bad file chunk {} at path {:?}:{} : {:?}",
-                    hash, path, idx, e
-                );
+                error!("Bad file chunk {hash} at path {path:?}:{idx} : {e:?}");
             }
             Ok(v) => {
                 if let Some(pb) = &mut pb {
@@ -502,7 +499,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
                     }
                 }
                 Err(e) => {
-                    error!("Bad row '{}`: {:?}", row, e);
+                    error!("Bad row '{row}`: {e:?}");
                 }
             }
         }
@@ -547,7 +544,7 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
                     );
                 }
                 Err(e) => {
-                    error!("Bad row '{}`: {:?}", row, e);
+                    error!("Bad row '{row}`: {e:?}");
                 }
             }
         }
@@ -612,7 +609,7 @@ fn find_entries2<
                 }
                 Err(e) => {
                     ok = false;
-                    error!("Bad row '{}`: {:?}", row, e);
+                    error!("Bad row '{row}`: {e:?}");
                 }
             }
         }

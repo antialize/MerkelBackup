@@ -181,9 +181,9 @@ where
             },
             Err(e) => {
                 if e.is_timeout() {
-                    debug!("Request failed, retrying {:?}", e)
+                    debug!("Request failed, retrying {e:?}")
                 } else {
-                    warn!("Request failed, retrying {:?}", e)
+                    warn!("Request failed, retrying {e:?}")
                 }
                 *sleep
             }
