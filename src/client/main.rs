@@ -352,7 +352,7 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
         .iter()
         .next()
     {
-        Some(Err(e)) => error!("Bad root: {:?}", e),
+        Some(Err(e)) => error!("Bad root: {e:?}"),
         Some(Ok(root)) => {
             let url = format!(
                 "{}/roots/{}/{}",
@@ -368,7 +368,7 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
             })?;
         }
         None => {
-            error!("Could not find root {}", root);
+            error!("Could not find root {root}");
         }
     }
     Ok(())
@@ -388,7 +388,7 @@ fn main() -> Result<(), Error> {
     log::set_logger(&LOGGER).unwrap();
     let (config, command) = parse_config()?;
     log::set_max_level(config.verbosity.into());
-    debug!("Config {:?}", config);
+    debug!("Config {config:?}");
 
     debug!("Derive secret!!\n");
 

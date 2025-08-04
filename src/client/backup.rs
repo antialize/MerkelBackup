@@ -168,7 +168,10 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         .to_str()
         .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
     if let Some(p) = &mut state.progress {
-        let start = i64::max(0, path_str.len() as i64 - 40) as usize;
+        let mut start = i64::max(0, path_str.len() as i64 - 40) as usize;
+        while !path_str.is_char_boundary(start) {
+            start -= 1;
+        }
         p.message(&format!("{} ", &path_str[start..]));
     }
 
@@ -251,7 +254,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     let raw_entries = match fs::read_dir(dir) {
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
-            error!("Unable to backup folder {:?}: {:?}\n", dir, e);
+            error!("Unable to backup folder {dir:?}: {e:?}\n");
             return Ok(());
         }
         Ok(v) => v,
@@ -261,7 +264,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
         let md = match fs::symlink_metadata(&path) {
             Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                error!("Unable to backup entry {:?}: {:?}\n", path, e);
+                error!("Unable to backup entry {path:?}: {e:?}\n");
                 continue;
             }
             Ok(v) => v,
@@ -324,7 +327,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             let link = match fs::read_link(&path) {
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    error!("Unable to backup link {:?}: {:?}\n", path, e);
+                    error!("Unable to backup link {path:?}: {e:?}\n");
                     continue;
                 }
                 Ok(v) => v,
@@ -398,7 +401,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         state.update_remote_stmt.execute(params![chunk])?;
         cnt += 1;
     }
-    info!("Prune detected. {} objects reloaded from remote state", cnt);
+    info!("Prune detected. {cnt} objects reloaded from remote state");
     Ok(())
 }
 

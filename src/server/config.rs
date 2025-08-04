@@ -112,14 +112,14 @@ pub fn parse_config() -> Config {
             let data = match std::fs::read_to_string(&path) {
                 Ok(data) => data,
                 Err(e) => {
-                    error!("Unable to open config file {:?}: {:?}", path, e);
+                    error!("Unable to open config file {path:?}: {e:?}");
                     std::process::exit(1)
                 }
             };
             match toml::from_str(&data) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    error!("Unable to parse config file {:?}: {:?}", path, e);
+                    error!("Unable to parse config file {path:?}: {e:?}");
                     std::process::exit(1)
                 }
             }

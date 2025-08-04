@@ -22,7 +22,7 @@ fn handle_error<E: std::fmt::Debug>(
     e: E,
 ) -> ResponseFuture {
     //if code != StatusCode::NOT_FOUND {
-    error!("{}:{}: {} {} error {:?}", file, line, message, code, e);
+    error!("{file}:{line}: {message} {code} error {e:?}");
     //}
     Ok(Response::builder()
         .status(code)
@@ -72,6 +72,7 @@ fn unauthorized_message() -> ResponseFuture {
 /// Check if the user has an access lever greater than or equal to level
 /// If he does None is returned
 /// Otherwise Some(unauthorized_message()) is returned
+#[allow(clippy::result_large_err)]
 fn check_auth<'a>(
     req: &Request<Incoming>,
     state: &'a State,
@@ -143,7 +144,7 @@ async fn handle_put_chunk(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
-        warn!("Unauthorized access for put chunk {}/{}", bucket, chunk);
+        warn!("Unauthorized access for put chunk {bucket}/{chunk}");
         return res;
     }
 
@@ -283,7 +284,7 @@ async fn handle_get_chunk(
             AccessType::Get
         },
     ) {
-        warn!("Unauthorized access for get chunk {}/{}", bucket, chunk);
+        warn!("Unauthorized access for get chunk {bucket}/{chunk}");
         return res;
     }
 
@@ -457,7 +458,7 @@ async fn handle_delete_chunk(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
-        warn!("Unauthorized access for delete chunk {}/{}", bucket, chunk);
+        warn!("Unauthorized access for delete chunk {bucket}/{chunk}");
         return res;
     }
     state.stat.delete_chunk_count.inc();
@@ -497,7 +498,7 @@ async fn handle_delete_chunks(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
-        warn!("Unauthorized access for delete chunks {}", bucket);
+        warn!("Unauthorized access for delete chunks {bucket}");
         return res;
     }
     state.stat.delete_chunks_count.inc();
@@ -561,7 +562,7 @@ async fn handle_list_chunks(
         },
     ) {
         Err(res) => {
-            warn!("Unauthorized access for list chunks {}", bucket);
+            warn!("Unauthorized access for list chunks {bucket}");
             return res;
         }
         Ok(u) if u.access_level == AccessType::Get && u.max_root_age.is_some() => {
@@ -649,7 +650,7 @@ async fn handle_get_status(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
-        warn!("Unauthorized access for get status {}", bucket);
+        warn!("Unauthorized access for get status {bucket}");
         return res;
     }
     tryfut!(
@@ -684,7 +685,7 @@ async fn handle_get_roots(
 ) -> ResponseFuture {
     let earliest_root = match check_auth(&req, &state, AccessType::Get) {
         Err(res) => {
-            warn!("Unauthorized access for get roots {}", bucket);
+            warn!("Unauthorized access for get roots {bucket}");
             return res;
         }
         Ok(u) => u.max_root_age.map(|v| {
@@ -743,7 +744,7 @@ async fn handle_put_root(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Put) {
-        warn!("Unauthorized access for put root {}", bucket);
+        warn!("Unauthorized access for put root {bucket}");
         return res;
     }
 
@@ -800,7 +801,7 @@ async fn handle_delete_root(
     state: Arc<State>,
 ) -> ResponseFuture {
     if let Err(res) = check_auth(&req, &state, AccessType::Delete) {
-        warn!("Unauthorized access for delete root {}", bucket);
+        warn!("Unauthorized access for delete root {bucket}");
         return res;
     }
     tryfut!(
