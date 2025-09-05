@@ -301,7 +301,7 @@ pub struct Roots<'l> {
 }
 
 impl Roots<'_> {
-    pub fn iter(&self) -> RootsIter {
+    pub fn iter(&self) -> RootsIter<'_> {
         RootsIter {
             rows: self.text.split("\0\0"),
             filter: self.filter,
