@@ -1,5 +1,5 @@
-use crate::shared::{check_response, Config, EType, Error, Level, Secrets};
 use crate::RestoreCommand;
+use crate::shared::{Config, EType, Error, Level, Secrets, check_response};
 use blake2::Digest;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chrono::DateTime;

@@ -21,7 +21,7 @@ use handler::backup_serve;
 mod state;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use state::{setup_db, Stat, State};
+use state::{Stat, State, setup_db};
 
 struct Logger {}
 impl log::Log for Logger {

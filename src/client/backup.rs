@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::shared::Level;
-use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
+use crate::shared::{Config, EType, Error, Secrets, check_response, retry};
 use blake2::Digest;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use log::debug;
@@ -14,7 +14,7 @@ use log::error;
 use log::info;
 use pbr::ProgressBar;
 use rand_core::TryRngCore;
-use rusqlite::{params, Connection, Statement};
+use rusqlite::{Connection, Statement, params};
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -69,10 +69,10 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
     }
 
     // For small chunks it is quicker to just reupload
-    if let Some(size) = size {
-        if size < 1024 * 16 {
-            return Ok(HasChunkResult::No);
-        }
+    if let Some(size) = size
+        && size < 1024 * 16
+    {
+        return Ok(HasChunkResult::No);
     }
 
     let url = format!(

@@ -1,5 +1,5 @@
 use http_body_util::Full;
-use hyper::{body::Bytes, Response};
+use hyper::{Response, body::Bytes};
 
 #[derive(Debug)]
 pub enum Error {

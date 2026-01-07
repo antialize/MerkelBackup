@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 fn main() {
     let conn = Connection::open("backup.db").expect("Unable to open hash cache");
@@ -53,7 +53,9 @@ fn main() {
             match row {
                 Ok(found_size) => {
                     if size != found_size {
-                        println!("Object {id} {hash} of size {size} internal content is wrong size {found_size}");
+                        println!(
+                            "Object {id} {hash} of size {size} internal content is wrong size {found_size}"
+                        );
                     }
                 }
                 Err(_) => {

@@ -7,7 +7,7 @@ mod visit;
 use blake2::Digest;
 use chrono::DateTime;
 use log::{debug, error};
-use shared::{check_response, Config, Error, Level, Secrets};
+use shared::{Config, Error, Level, Secrets, check_response};
 
 struct Logger {}
 impl log::Log for Logger {
@@ -254,10 +254,10 @@ fn parse_config() -> Result<(Config, Commands), Error> {
     if let Some(v) = args.password {
         config.password = v;
     }
-    if config.password.is_empty() {
-        if let Ok(v) = std::env::var("PASSWORD") {
-            config.password = v;
-        }
+    if config.password.is_empty()
+        && let Ok(v) = std::env::var("PASSWORD")
+    {
+        config.password = v;
     }
     if config.password.is_empty() {
         return Err(Error::Msg("No password specified"));
@@ -266,10 +266,10 @@ fn parse_config() -> Result<(Config, Commands), Error> {
     if let Some(v) = args.encryption_key {
         config.encryption_key = v;
     }
-    if config.encryption_key.is_empty() {
-        if let Ok(v) = std::env::var("KEY") {
-            config.encryption_key = v;
-        }
+    if config.encryption_key.is_empty()
+        && let Ok(v) = std::env::var("KEY")
+    {
+        config.encryption_key = v;
     }
     if config.encryption_key.is_empty() {
         return Err(Error::Msg("No encryption key specified"));
@@ -331,10 +331,10 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
         let id: u64 = ans.first().ok_or(Error::MissingRow())?.parse()?;
         let host: &str = ans.get(1).ok_or(Error::MissingRow())?;
         let time: i64 = ans.get(2).ok_or(Error::MissingRow())?.parse()?;
-        if let Some(name) = host_name {
-            if name != host {
-                continue;
-            }
+        if let Some(name) = host_name
+            && name != host
+        {
+            continue;
         }
         println!(
             "{:<5} {:12} {}",
