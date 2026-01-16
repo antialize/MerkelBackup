@@ -1,0 +1,7 @@
+[package]
+name = "merkel_backup_plugin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+abi_stable = {version= "0.11", default-features = false}

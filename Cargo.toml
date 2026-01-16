@@ -1,8 +1,8 @@
 [package]
-edition = "2021"
+edition = "2024"
 
 name = "mbackup"
-version = "0.1.5"
+version = "0.1.6"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
@@ -26,12 +26,15 @@ path = "src/offline_validate.rs"
 name = "mbackup_flush_db"
 path = "src/flush_db.rs"
 
+[workspace]
+resolver = "3"
+members = ["merkel_backup_plugin"]
 
 [dependencies]
 log = "0.4"
-rusqlite = {version = "0.37", features = ["bundled"] }
+rusqlite = {version = "0.38", features = ["bundled", "fallible_uint"] }
 rand_core = {version = "0.9", features = ["os_rng"] }
-reqwest = {version = "0.12", features=["blocking", "rustls-tls"], default-features=false}
+reqwest = {version = "0.13", features=["blocking"], default-features=false}
 hex = "0.4"
 clap = {version = "4", features = ["derive"] }
 toml = "0.9"
@@ -53,3 +56,5 @@ cipher = "0.4"
 http-body-util = "0.1"
 hyper-util = "0.1"
 thiserror = "2"
+abi_stable = {version="0.11.3", default-features = false}
+merkel_backup_plugin = {path = "merkel_backup_plugin"}

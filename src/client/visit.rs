@@ -1,9 +1,14 @@
-use crate::shared::{check_response, Config, EType, Error, Level, Secrets};
 use crate::RestoreCommand;
+use crate::shared::{Config, EType, Error, Level, Secrets, check_response};
+use abi_stable::sabi_trait::TD_Opaque;
+use abi_stable::std_types::RResult::{RErr, ROk};
+use abi_stable::std_types::{RBoxError, RStr, RVec};
 use blake2::Digest;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chrono::DateTime;
+use itertools::Itertools;
 use log::{debug, error, info};
+use merkel_backup_plugin::{ParsedEnt, PluginBox, ReadContext, ReadContextRef, Result as PResult};
 use pbr::ProgressBar;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -155,6 +160,40 @@ fn row_entry(row: &str) -> Result<Option<Ent>, Error> {
             .map(std::string::ToString::to_string)
             .collect(),
     }))
+}
+
+enum ParsedEntry<'a> {
+    None,
+    Normal(Ent),
+    Plugin {
+        plugin_idx: usize,
+        plugin: &'a mut PluginBox,
+        line: &'a str,
+    },
+}
+
+fn parse_entry<'a>(row: &'a str, plugins: &'a mut [PluginBox]) -> Result<ParsedEntry<'a>, Error> {
+    if let Some(rem) = row.strip_prefix('@') {
+        let (plugin, rem) = rem.split_once('\0').ok_or(Error::Msg("Plugin missing"))?;
+        let (name, rem) = rem
+            .split_once('\0')
+            .ok_or(Error::Msg("Plugin name missing"))?;
+        let (plugin_idx, plugin) = plugins
+            .iter_mut()
+            .find_position(|v| v.plugin() == plugin && v.name() == name)
+            .ok_or(Error::Msg("Plugin not loaded"))?;
+        Ok(ParsedEntry::Plugin {
+            plugin_idx,
+            plugin,
+            line: rem,
+        })
+    } else {
+        match row_entry(row) {
+            Ok(None) => Ok(ParsedEntry::None),
+            Ok(Some(ent)) => Ok(ParsedEntry::Normal(ent)),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,22 +367,84 @@ pub fn roots<'a: 'b, 'b>(
     Ok(Roots { filter, text })
 }
 
+enum OwnedEntry {
+    Normal(Ent),
+    Plugin { plugin_idx: usize, line: String },
+}
+
+struct Context<'a> {
+    client: &'a mut reqwest::blocking::Client,
+    config: &'a Config,
+    secrets: &'a Secrets,
+}
+
+impl<'a> ReadContext for Context<'a> {
+    fn get_chunk(&mut self, chunk: RStr, output: &mut RVec<u8>) -> PResult<()> {
+        match get_chunk(self.client, self.config, self.secrets, chunk.as_str()) {
+            Ok(e) => {
+                output.clear();
+                output.extend_from_slice(&e);
+                ROk(())
+            }
+            Err(e) => RErr(RBoxError::new(e)),
+        }
+    }
+
+    fn has_chunks(&mut self, chunks: RStr) -> PResult<bool> {
+        for chunk in chunks.split(",") {
+            let url = format!(
+                "{}/chunks/{}/{}",
+                &self.config.server,
+                hex::encode(self.secrets.bucket),
+                &chunk
+            );
+            let res = match self
+                .client
+                .head(&url[..])
+                .basic_auth(&self.config.user, Some(&self.config.password))
+                .send()
+            {
+                Ok(v) => v,
+                Err(e) => return RErr(RBoxError::new(e)),
+            };
+            match res.status() {
+                reqwest::StatusCode::OK => (),
+                reqwest::StatusCode::NOT_FOUND => return ROk(false),
+                code => return RErr(RBoxError::new(Error::HttpStatus(code))),
+            }
+        }
+        ROk(true)
+    }
+}
+
 fn full_validate(
-    entries: &[(Root<'_>, Ent)],
+    entries: &[(Root<'_>, OwnedEntry)],
     client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
+    plugins: &mut [PluginBox],
 ) -> Result<bool, Error> {
     let mut files: HashMap<&str, (usize, &PathBuf)> = HashMap::new();
     let mut bytes: u64 = 0;
     for (_, ent) in entries.iter() {
-        if ent.etype != EType::File {
-            continue;
+        match ent {
+            OwnedEntry::Normal(ent) => {
+                if ent.etype != EType::File {
+                    continue;
+                }
+                for (idx, chunk) in ent.chunks.iter().enumerate() {
+                    files.entry(chunk).or_insert((idx, &ent.path));
+                }
+                bytes += ent.size;
+            }
+            OwnedEntry::Plugin { plugin_idx, line } => {
+                let ent = plugins[*plugin_idx]
+                    .parse_ent(line.as_str().into())
+                    .into_result()
+                    .map_err(Error::Plugin)?;
+                bytes += ent.size as u64;
+            }
         }
-        for (idx, chunk) in ent.chunks.iter().enumerate() {
-            files.entry(chunk).or_insert((idx, &ent.path));
-        }
-        bytes += ent.size;
     }
 
     let mut pb = if config.verbosity >= Level::Info {
@@ -374,6 +475,39 @@ fn full_validate(
             }
         }
     }
+
+    let mut context = Context {
+        client,
+        config,
+        secrets,
+    };
+
+    for (_, ent) in entries.iter() {
+        let OwnedEntry::Plugin { plugin_idx, line } = ent else {
+            continue;
+        };
+        let context = ReadContextRef::from_ptr(&mut context, TD_Opaque);
+        match plugins[*plugin_idx].validate_ent(line.as_str().into(), true, context) {
+            RErr(e) => {
+                let ent = plugins[*plugin_idx]
+                    .parse_ent(line.as_str().into())
+                    .into_result()
+                    .map_err(Error::Plugin)?;
+                bad_files += 1;
+                error!("Invalid {} {}: {:?}", ent.etype, ent.name, e);
+            }
+            ROk(_) => {
+                if let Some(pb) = &mut pb {
+                    let ent = plugins[*plugin_idx]
+                        .parse_ent(line.as_str().into())
+                        .into_result()
+                        .map_err(Error::Plugin)?;
+                    pb.add(ent.size as u64);
+                }
+            }
+        }
+    }
+
     if let Some(pb) = &mut pb {
         pb.finish();
     }
@@ -386,10 +520,11 @@ fn full_validate(
 }
 
 fn partial_validate(
-    entries: &[(Root<'_>, Ent)],
+    entries: &[(Root<'_>, OwnedEntry)],
     client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
+    plugins: &mut [PluginBox],
 ) -> Result<bool, Error> {
     info!("Fetching chunk list",);
     let url = format!(
@@ -422,43 +557,68 @@ fn partial_validate(
     let mut ok = true;
     info!("Checking entries");
     for (_, ent) in entries {
-        if ent.etype != EType::File {
-            continue;
-        }
-        let mut ent_size: i64 = 0;
-        for chunk in &ent.chunks {
-            let chunk: &str = chunk;
-            if chunk == "empty" {
-                continue;
-            }
-            match existing.get(chunk) {
-                Some((size, content_size)) => {
-                    if size != content_size {
-                        error!(
-                            "Chunk {} of entry {:?}, should have size {} but had size {}",
-                            chunk, ent.path, size, content_size
-                        );
-                        ok = false;
-                    }
-                    ent_size += size - 12;
+        match ent {
+            OwnedEntry::Normal(ent) => {
+                if ent.etype != EType::File {
+                    continue;
                 }
-                None => {
-                    error!("Missing chunk {} of entry {:?}", chunk, ent.path);
+                let mut ent_size: i64 = 0;
+                for chunk in &ent.chunks {
+                    let chunk: &str = chunk;
+                    if chunk == "empty" {
+                        continue;
+                    }
+                    match existing.get(chunk) {
+                        Some((size, content_size)) => {
+                            if size != content_size {
+                                error!(
+                                    "Chunk {} of entry {:?}, should have size {} but had size {}",
+                                    chunk, ent.path, size, content_size
+                                );
+                                ok = false;
+                            }
+                            ent_size += size - 12;
+                        }
+                        None => {
+                            error!("Missing chunk {} of entry {:?}", chunk, ent.path);
+                            ok = false;
+                        }
+                    };
+                }
+                if ent.size as i64 != ent_size {
+                    error!(
+                        "Entry {:?}, should have size {} but had size {}",
+                        ent.path, ent.size, ent_size
+                    );
+                }
+            }
+            OwnedEntry::Plugin { plugin_idx, line } => {
+                let plugin = &mut plugins[*plugin_idx];
+                let mut context = Context {
+                    client,
+                    config,
+                    secrets,
+                };
+                let context = ReadContextRef::from_ptr(&mut context, TD_Opaque);
+                if let RErr(e) = plugin.validate_ent(line.as_str().into(), false, context) {
+                    let ent = plugin
+                        .parse_ent(line.as_str().into())
+                        .into_result()
+                        .map_err(Error::Plugin)?;
+                    error!("Validation of {} {} failed: {:?}", ent.etype, ent.name, e);
                     ok = false;
                 }
-            };
-        }
-        if ent.size as i64 != ent_size {
-            error!(
-                "Entry {:?}, should have size {} but had size {}",
-                ent.path, ent.size, ent_size
-            );
+            }
         }
     }
     Ok(ok)
 }
 
-pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
+pub fn disk_usage(
+    config: Config,
+    secrets: Secrets,
+    plugins: &mut [PluginBox],
+) -> Result<(), Error> {
     let mut client = reqwest::blocking::Client::new();
     let root_visit = roots(&config, &secrets, &client, None)?;
     let mut root_vec = Vec::new();
@@ -485,9 +645,21 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
         total_size += v.len() as u64;
 
         for row in v.split("\0\0") {
-            match row_entry(row) {
-                Ok(None) => {}
-                Ok(Some(ent)) => {
+            match parse_entry(row, plugins) {
+                Ok(ParsedEntry::None) => {}
+                Ok(ParsedEntry::Plugin { plugin, line, .. }) => {
+                    match plugin.parse_ent(line.into()) {
+                        ROk(v) => {
+                            for chunk in v.chunks.split(',') {
+                                if seen.insert(chunk.to_string()) {
+                                    total_size += size;
+                                }
+                            }
+                        }
+                        RErr(e) => error!("Bad row '{row}`: {e:?}"),
+                    }
+                }
+                Ok(ParsedEntry::Normal(ent)) => {
                     size += ent.size;
                     let mut remaining = ent.size;
                     for chunk in ent.chunks {
@@ -498,9 +670,7 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
                         remaining -= chunk_size;
                     }
                 }
-                Err(e) => {
-                    error!("Bad row '{row}`: {e:?}");
-                }
+                Err(e) => error!("Bad row '{row}`: {e:?}"),
             }
         }
         let time_str = std::format!(
@@ -518,7 +688,12 @@ pub fn disk_usage(config: Config, secrets: Secrets) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error> {
+pub fn list_root(
+    root: &str,
+    config: Config,
+    secrets: Secrets,
+    plugins: &mut [PluginBox],
+) -> Result<(), Error> {
     let mut client = reqwest::blocking::Client::new();
     info!("{:4} {:<70} {:>10}", "Type", "Path", "Size",);
     for root in roots(&config, &secrets, &client, Some(root))?.iter() {
@@ -531,9 +706,22 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
             Ok(v) => v,
         };
         for row in v.split("\0\0") {
-            match row_entry(row) {
-                Ok(None) => {}
-                Ok(Some(ent)) => {
+            match parse_entry(row, plugins) {
+                Ok(ParsedEntry::None) => {}
+                Ok(ParsedEntry::Plugin { plugin, line, .. }) => {
+                    match plugin.parse_ent(line.into()) {
+                        ROk(ParsedEnt {
+                            etype, name, size, ..
+                        }) => {
+                            let size = Size::from(size as u64);
+                            info!("{:4} {:<70} {:>10}", etype, name, size);
+                        }
+                        RErr(e) => {
+                            error!("Bad row '{row}`: {e:?}");
+                        }
+                    }
+                }
+                Ok(ParsedEntry::Normal(ent)) => {
                     let etype = format!("{}", ent.etype);
                     let size = Size::from(ent.size);
                     info!(
@@ -543,9 +731,7 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
                         size
                     );
                 }
-                Err(e) => {
-                    error!("Bad row '{row}`: {e:?}");
-                }
+                Err(e) => error!("Bad row '{row}`: {e:?}"),
             }
         }
     }
@@ -554,13 +740,14 @@ pub fn list_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Err
 
 fn find_entries2<
     'a,
-    Handler: FnMut(Root<'a>, Ent),
+    Handler: FnMut(Root<'a>, ParsedEntry),
     Filter: for<'b> FnMut(&Root<'b>) -> Result<bool, Error>,
 >(
     client: &mut reqwest::blocking::Client,
     config: &Config,
     secrets: &Secrets,
     roots: &'a Roots<'a>,
+    plugins: &mut [PluginBox],
     mut filter_root: Filter,
     mut handle_entry: Handler,
 ) -> Result<(bool, bool), Error> {
@@ -589,7 +776,7 @@ fn find_entries2<
 
         handle_entry(
             root,
-            Ent {
+            ParsedEntry::Normal(Ent {
                 path: PathBuf::new(),
                 etype: EType::Root,
                 size: 0,
@@ -598,13 +785,12 @@ fn find_entries2<
                 gid: 0,
                 mtime: 0,
                 chunks: vec![root.hash.to_string()],
-            },
+            }),
         );
 
         for row in v.split("\0\0") {
-            match row_entry(row) {
-                Ok(None) => {}
-                Ok(Some(ent)) => {
+            match parse_entry(row, plugins) {
+                Ok(ent) => {
                     handle_entry(root, ent);
                 }
                 Err(e) => {
@@ -617,21 +803,36 @@ fn find_entries2<
     Ok((root_found, ok))
 }
 
-fn find_entries<Handler: FnMut(Ent), Filter: for<'a> FnMut(&Root<'a>) -> Result<bool, Error>>(
+fn find_entries<
+    Handler: FnMut(ParsedEntry),
+    Filter: for<'a> FnMut(&Root<'a>) -> Result<bool, Error>,
+>(
     config: &Config,
     secrets: &Secrets,
     only_root: Option<&str>,
+    plugins: &mut [PluginBox],
     filter_root: Filter,
     mut handle_entry: Handler,
 ) -> Result<(bool, bool), Error> {
     let mut client = reqwest::blocking::Client::new();
     let roots = roots(config, secrets, &client, only_root)?;
-    find_entries2(&mut client, config, secrets, &roots, filter_root, |_, e| {
-        handle_entry(e)
-    })
+    find_entries2(
+        &mut client,
+        config,
+        secrets,
+        &roots,
+        plugins,
+        filter_root,
+        |_, e| handle_entry(e),
+    )
 }
 
-pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool, Error> {
+pub fn run_validate(
+    config: Config,
+    secrets: Secrets,
+    full: bool,
+    plugins: &mut [PluginBox],
+) -> Result<bool, Error> {
     let mut client = reqwest::blocking::Client::new();
     let roots = roots(&config, &secrets, &client, None)?;
 
@@ -641,33 +842,66 @@ pub fn run_validate(config: Config, secrets: Secrets, full: bool) -> Result<bool
         &config,
         &secrets,
         &roots,
+        plugins,
         |_| Ok(true),
-        |root, ent| {
-            entries.push((root, ent));
+        |root, ent| match ent {
+            ParsedEntry::None => (),
+            ParsedEntry::Normal(ent) => entries.push((root, OwnedEntry::Normal(ent))),
+            ParsedEntry::Plugin {
+                plugin_idx, line, ..
+            } => entries.push((
+                root,
+                OwnedEntry::Plugin {
+                    plugin_idx,
+                    line: line.to_string(),
+                },
+            )),
         },
     )?;
-
     if full {
-        ok = full_validate(&entries, &mut client, &config, &secrets)? && ok;
+        ok = full_validate(&entries, &mut client, &config, &secrets, plugins)? && ok;
     } else {
-        ok = partial_validate(&entries, &mut client, &config, &secrets)? && ok;
+        ok = partial_validate(&entries, &mut client, &config, &secrets, plugins)? && ok;
     }
     Ok(ok)
 }
 
-pub fn run_restore(config: Config, secrets: Secrets, args: RestoreCommand) -> Result<bool, Error> {
-    let mut entries: Vec<Ent> = Vec::new();
+pub fn run_restore(
+    config: Config,
+    secrets: Secrets,
+    args: RestoreCommand,
+    plugins: &mut [PluginBox],
+) -> Result<bool, Error> {
+    let mut entries: Vec<OwnedEntry> = Vec::new();
 
     let (root_found, ok) = find_entries(
         &config,
         &secrets,
         Some(args.root.as_ref()),
+        plugins,
         |_| Ok(true),
-        |ent| {
-            if ent.path.starts_with(&args.pattern)
-                || (args.pattern.starts_with(&ent.path) && ent.etype == EType::Dir)
-            {
-                entries.push(ent);
+        |ent| match ent {
+            ParsedEntry::None => (),
+            ParsedEntry::Normal(ent) => {
+                if ent.path.starts_with(&args.pattern)
+                    || (args.pattern.starts_with(&ent.path) && ent.etype == EType::Dir)
+                {
+                    entries.push(OwnedEntry::Normal(ent));
+                }
+            }
+            ParsedEntry::Plugin {
+                plugin_idx,
+                plugin,
+                line,
+            } => {
+                if let Some(pattern) = args.pattern.as_os_str().to_str()
+                    && let ROk(true) = plugin.ent_matches_pattern(line.into(), pattern.into())
+                {
+                    entries.push(OwnedEntry::Plugin {
+                        plugin_idx,
+                        line: line.to_string(),
+                    });
+                }
             }
         },
     )?;
@@ -675,7 +909,19 @@ pub fn run_restore(config: Config, secrets: Secrets, args: RestoreCommand) -> Re
     if !root_found {
         return Err(Error::Msg("Root not found"));
     }
-    let bytes = entries.iter().map(|e| e.size).sum();
+    let mut bytes = 0;
+    for ent in &entries {
+        bytes += match ent {
+            OwnedEntry::Normal(ent) => ent.size,
+            OwnedEntry::Plugin { plugin_idx, line } => {
+                plugins[*plugin_idx]
+                    .parse_ent(line.as_str().into())
+                    .into_result()
+                    .map_err(Error::Plugin)?
+                    .size as u64
+            }
+        }
+    }
     let mut pb = if config.verbosity >= Level::Info {
         let mut pb = ProgressBar::new(bytes);
         pb.set_max_refresh_rate(Some(Duration::from_millis(500)));
@@ -688,18 +934,53 @@ pub fn run_restore(config: Config, secrets: Secrets, args: RestoreCommand) -> Re
     let mut client = reqwest::blocking::Client::new();
 
     for ent in entries {
-        if let Err(e) = recover_entry(
-            &mut pb,
-            &ent,
-            args.dry,
-            &args.dest,
-            args.preserve_owner,
-            &mut client,
-            &config,
-            &secrets,
-        ) {
-            error!("Unable to recover entry {:?}: {:?}", ent.path, e);
-            return Err(e);
+        match ent {
+            OwnedEntry::Normal(ent) => {
+                if let Err(e) = recover_entry(
+                    &mut pb,
+                    &ent,
+                    args.dry,
+                    &args.dest,
+                    args.preserve_owner,
+                    &mut client,
+                    &config,
+                    &secrets,
+                ) {
+                    error!("Unable to recover entry {:?}: {:?}", ent.path, e);
+                    return Err(e);
+                }
+            }
+            OwnedEntry::Plugin { plugin_idx, line } => {
+                if let Some(dest) = args.dest.to_str() {
+                    let mut context = Context {
+                        client: &mut client,
+                        config: &config,
+                        secrets: &secrets,
+                    };
+                    let context = ReadContextRef::from_ptr(&mut context, TD_Opaque);
+                    let plugin = &mut plugins[plugin_idx];
+                    if let RErr(e) = plugin.recover_ent(
+                        line.as_str().into(),
+                        dest.into(),
+                        args.dry,
+                        args.preserve_owner,
+                        context,
+                    ) {
+                        if let ROk(ent) = plugin.parse_ent(line.as_str().into()) {
+                            error!(
+                                "Unable to recover entry {} {}: {:?}",
+                                ent.etype, ent.name, e
+                            );
+                        }
+                        return Err(Error::Plugin(e));
+                    }
+                    if let Some(pb) = &mut pb
+                        && let ROk(ent) = plugin.parse_ent(line.as_str().into())
+                    {
+                        pb.add(ent.size as u64);
+                    }
+                }
+            }
         }
     }
     Ok(ok)
@@ -710,6 +991,7 @@ pub fn run_cat(
     secrets: Secrets,
     root: String,
     path: PathBuf,
+    plugins: &mut [PluginBox],
 ) -> Result<bool, Error> {
     let mut entries: Vec<Ent> = Vec::new();
 
@@ -717,11 +999,16 @@ pub fn run_cat(
         &config,
         &secrets,
         Some(root.as_ref()),
+        plugins,
         |_| Ok(true),
-        |ent| {
-            if ent.path == path {
-                entries.push(ent);
+        |ent| match ent {
+            ParsedEntry::None => (),
+            ParsedEntry::Normal(ent) => {
+                if ent.path == path {
+                    entries.push(ent);
+                }
             }
+            ParsedEntry::Plugin { .. } => (),
         },
     )?;
 
@@ -758,6 +1045,7 @@ pub fn run_prune(
     dry: bool,
     age: Option<u32>,
     exponential: bool,
+    plugins: &mut [PluginBox],
 ) -> Result<bool, Error> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
@@ -784,6 +1072,7 @@ pub fn run_prune(
         &config,
         &secrets,
         None,
+        plugins,
         |root| {
             let remove = if exponential {
                 // We visit roots in increasing time order
@@ -841,12 +1130,27 @@ pub fn run_prune(
                 Ok(true)
             }
         },
-        |ent| {
-            if ent.etype == EType::Link || ent.etype == EType::Dir {
-                return;
+        |ent| match ent {
+            ParsedEntry::None => {}
+            ParsedEntry::Normal(ent) => {
+                if ent.etype == EType::Link || ent.etype == EType::Dir {
+                    return;
+                }
+                for chunk in ent.chunks.iter() {
+                    used.insert(chunk.to_owned());
+                }
             }
-            for chunk in ent.chunks.iter() {
-                used.insert(chunk.to_owned());
+            ParsedEntry::Plugin { plugin, line, .. } => {
+                match plugin.parse_ent(line.into()).map_err(Error::Plugin) {
+                    ROk(v) => {
+                        for chunk in v.chunks.split(',') {
+                            used.insert(chunk.to_string());
+                        }
+                    }
+                    RErr(e) => {
+                        error!("Error visiting plugin entry: {e:?}");
+                    }
+                }
             }
         },
     )?;

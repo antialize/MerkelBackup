@@ -1,13 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use abi_stable::std_types::RStr;
 use clap::{Parser, Subcommand};
 mod backup;
 mod shared;
 mod visit;
+
 use blake2::Digest;
 use chrono::DateTime;
 use log::{debug, error};
-use shared::{check_response, Config, Error, Level, Secrets};
+use shared::{Config, Error, Level, Secrets, check_response};
 
 struct Logger {}
 impl log::Log for Logger {
@@ -254,10 +256,10 @@ fn parse_config() -> Result<(Config, Commands), Error> {
     if let Some(v) = args.password {
         config.password = v;
     }
-    if config.password.is_empty() {
-        if let Ok(v) = std::env::var("PASSWORD") {
-            config.password = v;
-        }
+    if config.password.is_empty()
+        && let Ok(v) = std::env::var("PASSWORD")
+    {
+        config.password = v;
     }
     if config.password.is_empty() {
         return Err(Error::Msg("No password specified"));
@@ -266,10 +268,10 @@ fn parse_config() -> Result<(Config, Commands), Error> {
     if let Some(v) = args.encryption_key {
         config.encryption_key = v;
     }
-    if config.encryption_key.is_empty() {
-        if let Ok(v) = std::env::var("KEY") {
-            config.encryption_key = v;
-        }
+    if config.encryption_key.is_empty()
+        && let Ok(v) = std::env::var("KEY")
+    {
+        config.encryption_key = v;
     }
     if config.encryption_key.is_empty() {
         return Err(Error::Msg("No encryption key specified"));
@@ -304,8 +306,8 @@ fn parse_config() -> Result<(Config, Commands), Error> {
         if !b.dir.is_empty() {
             config.backup_dirs = b.dir.iter().map(std::string::ToString::to_string).collect();
         }
-        if config.backup_dirs.is_empty() {
-            return Err(Error::Msg("No backup dirs specified"));
+        if config.backup_dirs.is_empty() && config.plugin.is_empty() {
+            return Err(Error::Msg("No backup dirs specified or plugins"));
         }
     }
 
@@ -331,10 +333,10 @@ fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Resu
         let id: u64 = ans.first().ok_or(Error::MissingRow())?.parse()?;
         let host: &str = ans.get(1).ok_or(Error::MissingRow())?;
         let time: i64 = ans.get(2).ok_or(Error::MissingRow())?.parse()?;
-        if let Some(name) = host_name {
-            if name != host {
-                continue;
-            }
+        if let Some(name) = host_name
+            && name != host
+        {
+            continue;
         }
         println!(
             "{:<5} {:12} {}",
@@ -392,16 +394,47 @@ fn main() -> Result<(), Error> {
 
     debug!("Derive secret!!\n");
 
+    let mut plugins: Vec<merkel_backup_plugin::PluginBox> = vec![];
+    for plugin in &config.plugin {
+        let config = match toml::to_string_pretty(&plugin) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "Failed to serialize plugin config for {}: {e:?}",
+                    plugin.file
+                );
+                std::process::exit(1);
+            }
+        };
+        let lib = match merkel_backup_plugin::load_plugin(Path::new(&plugin.file)) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to load plugin for {}: {e:?}", plugin.file);
+                std::process::exit(1);
+            }
+        };
+        let plugin = match lib.new_plugin()(RStr::from_str(&config)) {
+            abi_stable::std_types::RResult::ROk(v) => v,
+            abi_stable::std_types::RResult::RErr(e) => {
+                error!("Failed loading plugin from {}: {e:?}", plugin.file);
+                std::process::exit(1);
+            }
+        };
+        plugins.push(plugin);
+    }
+
     let secrets = derive_secrets(&config.encryption_key);
     let ok = match command {
         Commands::Backup(_) => {
-            backup::run(config, secrets)?;
+            backup::run(config, secrets, &mut plugins)?;
             true
         }
-        Commands::Validate(c) => visit::run_validate(config, secrets, c.full)?,
-        Commands::Prune(c) => visit::run_prune(config, secrets, c.dry, c.age, c.exponential)?,
-        Commands::Restore(c) => visit::run_restore(config, secrets, c)?,
-        Commands::Cat(c) => visit::run_cat(config, secrets, c.root, c.path)?,
+        Commands::Validate(c) => visit::run_validate(config, secrets, c.full, &mut plugins)?,
+        Commands::Prune(c) => {
+            visit::run_prune(config, secrets, c.dry, c.age, c.exponential, &mut plugins)?
+        }
+        Commands::Restore(c) => visit::run_restore(config, secrets, c, &mut plugins)?,
+        Commands::Cat(c) => visit::run_cat(config, secrets, c.root, c.path, &mut plugins)?,
         Commands::DeleteRoot(c) => {
             delete_root(&c.root, config, secrets)?;
             true
@@ -411,7 +444,7 @@ fn main() -> Result<(), Error> {
             true
         }
         Commands::Du => {
-            visit::disk_usage(config, secrets)?;
+            visit::disk_usage(config, secrets, &mut plugins)?;
             true
         }
         Commands::Ping => {
@@ -419,7 +452,7 @@ fn main() -> Result<(), Error> {
             true
         }
         Commands::Ls(c) => {
-            visit::list_root(&c.root, config, secrets)?;
+            visit::list_root(&c.root, config, secrets, &mut plugins)?;
             true
         }
     };

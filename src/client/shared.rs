@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
+use abi_stable::std_types::RBoxError;
 use log::{debug, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -72,6 +75,13 @@ impl From<Level> for log::LevelFilter {
     }
 }
 
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct Plugin {
+    pub file: String,
+    #[serde(flatten)]
+    extra: HashMap<String, toml::Value>,
+}
+
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -85,6 +95,7 @@ pub struct Config {
     pub cache_db: String,
     pub hostname: String,
     pub no_atime: bool,
+    pub plugin: Vec<Plugin>,
 }
 
 impl Default for Config {
@@ -100,6 +111,7 @@ impl Default for Config {
             cache_db: "cache.db".to_string(),
             hostname: "".to_string(),
             no_atime: true,
+            plugin: Default::default(),
         }
     }
 }
@@ -145,6 +157,8 @@ pub enum Error {
     StreamCipher(cipher::StreamCipherError),
     #[error("os_random_error {0}")]
     OsRandom(rand_core::OsError),
+    #[error("plugin {0}")]
+    Plugin(RBoxError),
 }
 
 impl From<cipher::StreamCipherError> for Error {

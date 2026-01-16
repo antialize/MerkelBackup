@@ -6,15 +6,32 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::shared::Level;
-use crate::shared::{check_response, retry, Config, EType, Error, Secrets};
+use crate::shared::{Config, EType, Error, Secrets, check_response, retry};
+use abi_stable::sabi_trait::TD_Opaque;
+use abi_stable::std_types::RBoxError;
+use abi_stable::std_types::RCowStr;
+use abi_stable::std_types::ROption;
+use abi_stable::std_types::ROption::RNone;
+use abi_stable::std_types::ROption::RSome;
+use abi_stable::std_types::RResult::RErr;
+use abi_stable::std_types::RResult::ROk;
+use abi_stable::std_types::RSlice;
+use abi_stable::std_types::RStr;
+use abi_stable::std_types::RString;
 use blake2::Digest;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use log::debug;
 use log::error;
 use log::info;
+use merkel_backup_plugin::BackupContext;
+use merkel_backup_plugin::BackupContextRef;
+use merkel_backup_plugin::Chunks;
+use merkel_backup_plugin::PluginBox;
 use pbr::ProgressBar;
 use rand_core::TryRngCore;
-use rusqlite::{params, Connection, Statement};
+use rusqlite::{Connection, Statement, params};
+
+use merkel_backup_plugin::Result as PResult;
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -41,6 +58,7 @@ struct State<'a> {
     has_remote_stmt: Statement<'a>,
     update_remote_stmt: Statement<'a>,
     get_chunks_stmt: Statement<'a>,
+    get_chunks_unsized_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
     rng: rand_core::OsRng,
     entries: Vec<DirEnt>,
@@ -48,6 +66,9 @@ struct State<'a> {
     transfered_bytes: usize,
     skipped_bytes: usize,
     conflict_bytes: usize,
+    plugin: RCowStr<'static>,
+    plugin_name: RCowStr<'static>,
+    plugin_entries: Vec<String>,
 }
 
 #[derive(PartialEq)]
@@ -69,10 +90,10 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
     }
 
     // For small chunks it is quicker to just reupload
-    if let Some(size) = size {
-        if size < 1024 * 16 {
-            return Ok(HasChunkResult::No);
-        }
+    if let Some(size) = size
+        && size < 1024 * 16
+    {
+        return Ok(HasChunkResult::No);
     }
 
     let url = format!(
@@ -92,6 +113,106 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
         reqwest::StatusCode::OK => Ok(HasChunkResult::Yes),
         reqwest::StatusCode::NOT_FOUND => Ok(HasChunkResult::No),
         code => Err(Error::HttpStatus(code)),
+    }
+}
+
+impl<'a> State<'a> {
+    fn get_chunks_impl(
+        &mut self,
+        path: &str,
+        size: Option<i64>,
+        mtime: i64,
+    ) -> Result<Option<Chunks>, Error> {
+        if self.config.recheck {
+            return Ok(None);
+        };
+        let path = format!("@{}/{}/{}", self.plugin, self.plugin_name, path);
+        let chunks = if let Some(size) = size {
+            let mut rows = self.get_chunks_stmt.query(params![path, size, mtime])?;
+            match rows.next()? {
+                Some(row) => {
+                    let chunks: String = row.get(0)?;
+                    Some(Chunks {
+                        chunks: chunks.into(),
+                        size,
+                    })
+                }
+                None => None,
+            }
+        } else {
+            let mut rows = self.get_chunks_unsized_stmt.query(params![path, mtime])?;
+            match rows.next()? {
+                Some(row) => {
+                    let chunks: String = row.get(0)?;
+                    let size: i64 = row.get(1)?;
+                    Some(Chunks {
+                        chunks: chunks.into(),
+                        size,
+                    })
+                }
+                None => None,
+            }
+        };
+        Ok(chunks)
+    }
+}
+
+impl<'a> BackupContext for State<'a> {
+    fn chunk_size(&self) -> usize {
+        CHUNK_SIZE as usize
+    }
+
+    fn get_chunks(
+        &mut self,
+        path: RStr,
+        size: ROption<i64>,
+        mtime: i64,
+    ) -> PResult<ROption<Chunks>> {
+        match self.get_chunks_impl(path.as_str(), size.into_option(), mtime) {
+            Ok(Some(v)) => ROk(RSome(v)),
+            Ok(None) => ROk(RNone),
+            Err(e) => RErr(RBoxError::new(e)),
+        }
+    }
+
+    fn has_chunks(&mut self, chunks: RStr) -> PResult<bool> {
+        for chunk in chunks.split(",") {
+            match has_chunk(chunk, self, None) {
+                Ok(HasChunkResult::No) => return ROk(false),
+                Ok(_) => (),
+                Err(e) => return RErr(RBoxError::new(e)),
+            }
+        }
+        ROk(true)
+    }
+
+    fn push_chunk(&mut self, content: RSlice<u8>) -> PResult<RString> {
+        match push_chunk(content.as_slice(), self) {
+            Ok(v) => ROk(v.into()),
+            Err(e) => RErr(RBoxError::new(e)),
+        }
+    }
+
+    fn add_entry(&mut self, line: RStr) -> PResult<()> {
+        self.plugin_entries
+            .push(format!("@{}\0{}\0{}", self.plugin, self.plugin_name, line));
+        ROk(())
+    }
+
+    fn update_chunks(&mut self, path: RStr, size: i64, mtime: i64, chunks: RStr) -> PResult<()> {
+        let path = format!("@{}/{}/{}", self.plugin, self.plugin_name, path);
+        match self
+            .update_chunks_stmt
+            .execute(params![path.as_str(), size, mtime, chunks.as_str()])
+        {
+            Ok(_) => ROk(()),
+            Err(e) => RErr(RBoxError::new(e)),
+        }
+    }
+
+    fn scan_register(&mut self, files: usize, bytes: usize) {
+        self.modified_files_count += files as u64;
+        self.transfer_bytes += bytes as u64;
     }
 }
 
@@ -405,7 +526,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
+pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Result<(), Error> {
     let t1 = SystemTime::now();
 
     let conn = Connection::open(&config.cache_db)?;
@@ -423,7 +544,6 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         )",
         [],
     )?;
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS remote (
             chunk TEXT NOT NULL UNIQUE,
@@ -449,6 +569,8 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")?,
         get_chunks_stmt: conn
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
+        get_chunks_unsized_stmt: conn
+            .prepare("SELECT chunks, size FROM files WHERE path = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
         rng: rand_core::OsRng,
@@ -457,6 +579,9 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         transfered_bytes: 0,
         conflict_bytes: 0,
         skipped_bytes: 0,
+        plugin_entries: Vec::new(),
+        plugin: RCowStr::from_str(""),
+        plugin_name: RCowStr::from_str(""),
     };
 
     update_remote(&conn, &mut state)?;
@@ -470,6 +595,14 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
         }
         info!("Scanning {}", &dir);
         backup_folder(path, &mut state)?;
+    }
+
+    for plugin in plugins.iter_mut() {
+        info!("Scanning plugin {}: {}", plugin.plugin(), plugin.name());
+        state.plugin = plugin.plugin();
+        state.plugin_name = plugin.name();
+        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+        plugin.scan(state).into_result().map_err(Error::Plugin)?;
     }
 
     if state.config.verbosity >= Level::Info {
@@ -491,6 +624,7 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
     );
 
     state.entries.clear();
+    state.plugin_entries.clear();
     state.scan = false;
     for dir in dirs.iter() {
         let path = Path::new(dir);
@@ -513,6 +647,14 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             ctime: md.st_ctime(),
         });
         backup_folder(path, &mut state)?;
+    }
+
+    for plugin in plugins.iter_mut() {
+        info!("Backing up plugin {}: {}", plugin.plugin(), plugin.name());
+        state.plugin = plugin.plugin();
+        state.plugin_name = plugin.name();
+        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+        plugin.backup(state).into_result().map_err(Error::Plugin)?;
     }
 
     let t3 = SystemTime::now();
@@ -544,6 +686,13 @@ pub fn run(config: Config, secrets: Secrets) -> Result<(), Error> {
             ent.mtime,
             ent.ctime,
         ));
+    }
+    for ent in state.plugin_entries.iter() {
+        if !ans.is_empty() {
+            ans.push('\0');
+            ans.push('\0');
+        }
+        ans.push_str(ent);
     }
 
     let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;

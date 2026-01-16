@@ -336,7 +336,7 @@ async fn handle_get_chunk(
                 //TODO use tokio for async fileread
                 Ok(data) => data,
                 Err(e) => {
-                    return handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing", e)
+                    return handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Chunk missing", e);
                 }
             }
         }
@@ -824,10 +824,10 @@ async fn handle_delete_root(
 }
 
 async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
-    if let Some(token) = &state.config.metrics_token {
-        if req.uri().query() != Some(token.as_str()) {
-            return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
-        }
+    if let Some(token) = &state.config.metrics_token
+        && req.uri().query() != Some(token.as_str())
+    {
+        return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
     }
 
     let mut ans = String::new();
