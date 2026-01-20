@@ -1,5 +1,5 @@
 FROM docker.io/rust:latest AS chef
-RUN cargo install cargo-chef 
+RUN cargo install cargo-chef
 WORKDIR /mbackup
 
 FROM chef AS planner
@@ -13,6 +13,9 @@ COPY . .
 RUN cargo install --offline --root /usr --path .
 
 FROM debian:stable-slim
+RUN apt-get update && \
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates librados2 && \
+rm -rf /var/cache/apt/archives /var/lib/apt/lists/*
 ARG GIT_COMMIT
 ARG GIT_COMMIT_FULL
 ARG GIT_BRANCH
