@@ -200,10 +200,10 @@ pub struct RestoreCommand {
 
 #[derive(Parser)]
 struct CatCommand {
-    // The root to delete
+    // The root to cat
     root: String,
 
-    // Path of file to restore
+    // Path of file to cat
     path: std::path::PathBuf,
 }
 
@@ -234,7 +234,7 @@ enum Commands {
     Ls(LsCommand),
     /// Delete a root
     DeleteRoot(DeleteRootCommand),
-    /// Delete a root
+    /// Restore an entry
     Restore(RestoreCommand),
     /// Dump file to stdout
     Cat(CatCommand),
