@@ -116,6 +116,9 @@ pub trait Plugin {
         preserve_owner: bool,
         context: ReadContextRef,
     ) -> Result<()>;
+
+    /// Hash of an entry
+    fn hash_ent<'a>(&mut self, ent_line: RStr<'a>, context: ReadContextRef) -> Result<RString>;
 }
 
 /// Owned Box of [Plugin]
