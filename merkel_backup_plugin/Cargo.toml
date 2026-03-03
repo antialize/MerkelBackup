@@ -2,6 +2,10 @@
 name = "merkel_backup_plugin"
 version = "0.2.0"
 edition = "2024"
+license = "MIT"
+homepage = "https://github.com/antialize/MerkelBackup/"
+repository = "https://github.com/antialize/MerkelBackup/"
+description = "A framework plugin for MerkelBackup, a backup solution for Rust projects."
 
 [dependencies]
 abi_stable = {version= "0.11", default-features = false}
