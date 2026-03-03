@@ -1230,3 +1230,127 @@ pub fn run_prune(
     }
     Ok(ok)
 }
+
+fn hash_ent(ent: &Ent, config: &Config, secrets: &Secrets) -> Result<String, Error> {
+    let mut client = reqwest::blocking::Client::new();
+    let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
+    for chunk in ent.chunks.iter() {
+        let res = get_chunk(&mut client, config, secrets, chunk)?;
+        hasher.update(res);
+    }
+
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn run_hash(
+    root: &str,
+    patterns: Vec<PathBuf>,
+    config: Config,
+    secrets: Secrets,
+    plugins: &mut [PluginBox],
+) -> Result<bool, Error> {
+    let mut entries: Vec<OwnedEntry> = Vec::new();
+
+    let (root_found, ok) = find_entries(
+        &config,
+        &secrets,
+        Some(root),
+        plugins,
+        |_| Ok(true),
+        |ent| match ent {
+            ParsedEntry::None => (),
+            ParsedEntry::Normal(ent) => {
+                for pattern in &patterns {
+                    if ent.path.starts_with(pattern) && ent.etype == EType::File {
+                        entries.push(OwnedEntry::Normal(ent));
+                        break;
+                    }
+                }
+            }
+            ParsedEntry::Plugin {
+                plugin_idx,
+                plugin,
+                line,
+            } => {
+                for pattern in &patterns {
+                    if let Some(pattern) = pattern.as_os_str().to_str()
+                        && let ROk(true) = plugin.ent_matches_pattern(line.into(), pattern.into())
+                    {
+                        entries.push(OwnedEntry::Plugin {
+                            plugin_idx,
+                            line: line.to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+        },
+    )?;
+
+    if !root_found {
+        return Err(Error::Msg("Root not found"));
+    }
+
+    let mut pb = if config.verbosity >= Level::Info {
+        let mut pb = ProgressBar::new(entries.len() as u64);
+        pb.set_max_refresh_rate(Some(Duration::from_millis(100)));
+        pb.set_units(pbr::Units::Default);
+        Some(pb)
+    } else {
+        None
+    };
+
+    let mut client = reqwest::blocking::Client::new();
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+
+    for ent in entries {
+        match ent {
+            OwnedEntry::Normal(ent) => {
+                match hash_ent(&ent, &config, &secrets) {
+                    Ok(hash) => {
+                        writeln!(handle, "{}::{}", ent.path.display(), hash)?;
+                    }
+                    Err(e) => {
+                        error!("Unable to hash entry {:?}: {:?}", ent.path, e);
+                        return Err(e);
+                    }
+                };
+                if let Some(pb) = &mut pb {
+                    pb.add(1);
+                };
+            }
+            OwnedEntry::Plugin { plugin_idx, line } => {
+                let mut context = Context {
+                    client: &mut client,
+                    config: &config,
+                    secrets: &secrets,
+                };
+                let context = ReadContextRef::from_ptr(&mut context, TD_Opaque);
+                let plugin = &mut plugins[plugin_idx];
+                let ent = plugin
+                    .parse_ent(line.as_str().into())
+                    .into_result()
+                    .map_err(Error::Plugin)?;
+
+                match plugin
+                    .hash_ent(line.as_str().into(), context)
+                    .into_result()
+                    .map_err(Error::Plugin)
+                {
+                    Ok(hash) => {
+                        writeln!(handle, "{}::{}", ent.name, hash)?;
+                    }
+                    Err(e) => {
+                        error!("Unable to hash entry {:?}: {:?}", ent.name, e);
+                        return Err(e);
+                    }
+                };
+                if let Some(pb) = &mut pb {
+                    pb.add(1);
+                };
+            }
+        }
+    }
+    Ok(ok)
+}

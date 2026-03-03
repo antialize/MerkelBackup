@@ -200,11 +200,20 @@ pub struct RestoreCommand {
 
 #[derive(Parser)]
 struct CatCommand {
-    // The root to delete
+    // The root to cat
     root: String,
 
-    // Path of file to restore
+    // Path of file to cat
     path: std::path::PathBuf,
+}
+
+#[derive(Parser)]
+struct HashCommand {
+    /// The root to hash from
+    root: String,
+
+    /// Path patterns of files to hash
+    patterns: Vec<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -225,10 +234,12 @@ enum Commands {
     Ls(LsCommand),
     /// Delete a root
     DeleteRoot(DeleteRootCommand),
-    /// Delete a root
+    /// Restore an entry
     Restore(RestoreCommand),
     /// Dump file to stdout
     Cat(CatCommand),
+    /// Compute blake2 Hash of entry
+    Hash(HashCommand),
 }
 
 fn parse_config() -> Result<(Config, Commands), Error> {
@@ -455,6 +466,7 @@ fn main() -> Result<(), Error> {
             visit::list_root(&c.root, config, secrets, &mut plugins)?;
             true
         }
+        Commands::Hash(c) => visit::run_hash(&c.root, c.patterns, config, secrets, &mut plugins)?,
     };
     if !ok {
         std::process::exit(1);
