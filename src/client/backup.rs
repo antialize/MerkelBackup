@@ -28,7 +28,8 @@ use merkel_backup_plugin::BackupContextRef;
 use merkel_backup_plugin::Chunks;
 use merkel_backup_plugin::PluginBox;
 use pbr::ProgressBar;
-use rand_core::TryRngCore;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use rusqlite::{Connection, Statement, params};
 
 use merkel_backup_plugin::Result as PResult;
@@ -60,7 +61,7 @@ struct State<'a> {
     get_chunks_stmt: Statement<'a>,
     get_chunks_unsized_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
-    rng: rand_core::OsRng,
+    rng: SysRng,
     entries: Vec<DirEnt>,
     modified_files_count: u64,
     transfered_bytes: usize,
@@ -239,7 +240,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
 
         let nonce: [u8; 12] = crypted[..12].try_into().unwrap();
         chacha20::ChaCha20::new(&state.secrets.key.into(), &nonce.into())
-            .apply_keystream_b2b(content, &mut crypted[12..])?;
+            .apply_keystream_b2b(content, &mut crypted[12..]);
         t2 = now.elapsed().as_millis();
 
         let res = retry(&mut || {
@@ -573,7 +574,7 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
             .prepare("SELECT chunks, size FROM files WHERE path = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
-        rng: rand_core::OsRng,
+        rng: SysRng,
         entries: Vec::new(),
         modified_files_count: 0,
         transfered_bytes: 0,

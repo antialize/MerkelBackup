@@ -6,7 +6,7 @@ mod backup;
 mod shared;
 mod visit;
 
-use blake2::Digest;
+use blake2::{Digest, digest::generic_array::GenericArray};
 use chrono::DateTime;
 use log::{debug, error};
 use shared::{Config, Error, Level, Secrets, check_response};
@@ -71,7 +71,7 @@ fn derive_secrets(password: &str) -> Secrets {
             hasher.update(&data[prev * W..(prev + 1) * W]);
             hasher.update(&data[o1 * W..(o1 + 1) * W]);
             hasher.update(&data[o2 * W..(o2 + 1) * W]);
-            hasher.finalize_into_reset(digest::generic_array::GenericArray::from_mut_slice(
+            hasher.finalize_into_reset(GenericArray::from_mut_slice(
                 &mut data[cur * W..(cur + 1) * W],
             ));
             prev = cur;

@@ -1,43 +1,18 @@
 use http_body_util::Full;
 use hyper::{Response, body::Bytes};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
-    Hyper(hyper::Error),
-    Rusqlite(rusqlite::Error),
-    OsRandom(rand_core::OsError),
+    #[error("hyper {0}")]
+    Hyper(#[from] hyper::Error),
+    #[error("rusqlite {0}")]
+    Rusqlite(#[from] rusqlite::Error),
+    #[error("os random {0}")]
+    OsRandom(#[from] rand::rngs::SysError),
+    #[error("server error: {0}")]
     Server(&'static str),
 }
-
-impl From<hyper::Error> for Error {
-    fn from(error: hyper::Error) -> Self {
-        Error::Hyper(error)
-    }
-}
-
-impl From<rusqlite::Error> for Error {
-    fn from(error: rusqlite::Error) -> Self {
-        Error::Rusqlite(error)
-    }
-}
-
-impl From<rand_core::OsError> for Error {
-    fn from(error: rand_core::OsError) -> Self {
-        Error::OsRandom(error)
-    }
-}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            Error::Hyper(ref e) => write!(f, "{e}"),
-            Error::Rusqlite(ref e) => write!(f, "{e}"),
-            Error::OsRandom(ref e) => write!(f, "{e}"),
-            Error::Server(s) => write!(f, "{s}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
