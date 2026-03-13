@@ -33,26 +33,26 @@ members = ["merkel_backup_plugin"]
 [dependencies]
 log = "0.4"
 rusqlite = {version = "0.38", features = ["bundled", "fallible_uint"] }
-rand_core = {version = "0.9", features = ["os_rng"] }
+rand = {version = "0.10", default-features = false, features = ["sys_rng"] }
 reqwest = {version = "0.13", features=["blocking", "rustls", "charset"], default-features=false}
 hex = "0.4"
 clap = {version = "4", features = ["derive"] }
-toml = "0.9"
+toml = "1"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 base64 = "0.22"
 pbr = "1.1"
-nix = { version = "0.30", features = ["user", "fs"],  default-features=false }
+nix = { version = "0.31", features = ["user", "fs"],  default-features=false }
 libc = "0.2"
 rust-lzma = "0.6"
 itertools = "0.14"
 hyper = {version="1", features =["http1", "server"] }
 tokio = {version="1", features = ["rt-multi-thread", "macros"]}
-sd-notify = "0.4"
+sd-notify = "0.5"
 blake2 = "0.10"
-chacha20 = "0.9"
-digest = "0.10"
-cipher = "0.4"
+chacha20 = "0.10"
+digest = "0.11"
+cipher = "0.5"
 http-body-util = "0.1"
 hyper-util = "0.1"
 thiserror = "2"

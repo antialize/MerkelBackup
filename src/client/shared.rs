@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use abi_stable::std_types::RBoxError;
 use log::{debug, warn};
+use rand::rngs::SysError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -154,23 +155,11 @@ pub enum Error {
     #[error("lzma")]
     Lzma(#[from] lzma::LzmaError),
     #[error("stream cipher error {0}")]
-    StreamCipher(cipher::StreamCipherError),
+    StreamCipher(#[from] cipher::StreamCipherError),
     #[error("os_random_error {0}")]
-    OsRandom(rand_core::OsError),
+    OsRandom(#[from] SysError),
     #[error("plugin {0}")]
     Plugin(RBoxError),
-}
-
-impl From<cipher::StreamCipherError> for Error {
-    fn from(error: cipher::StreamCipherError) -> Self {
-        Error::StreamCipher(error)
-    }
-}
-
-impl From<rand_core::OsError> for Error {
-    fn from(error: rand_core::OsError) -> Self {
-        Error::OsRandom(error)
-    }
 }
 
 pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error>

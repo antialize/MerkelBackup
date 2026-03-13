@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("Server listening on {}", &state.config.bind);
     info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
-    sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).unwrap();
+    sd_notify::notify(&[sd_notify::NotifyState::Ready]).unwrap();
 
     loop {
         let (stream, _) = listener.accept().await?;

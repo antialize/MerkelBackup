@@ -95,7 +95,7 @@ fn get_chunk(
     content.resize(encrypted.len() - 12, 0);
     let nonce: [u8; 12] = encrypted[..12].try_into().unwrap();
     chacha20::ChaCha20::new(&secrets.key.into(), &nonce.into())
-        .apply_keystream_b2b(&encrypted[12..], &mut content)?;
+        .apply_keystream_b2b(&encrypted[12..], &mut content);
 
     let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
     hasher.update(secrets.seed);
