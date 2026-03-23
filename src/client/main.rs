@@ -246,7 +246,23 @@ fn parse_config() -> Result<(Config, Commands), Error> {
     let args = Args::parse();
 
     let mut config: Config = match args.config {
-        Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
+        Some(path) => {
+            // The config file contains plaintext passwords; refuse to load it
+            // if it is readable by group or other.
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = meta.permissions().mode();
+                    if mode & 0o077 != 0 {
+                        return Err(Error::Msg(
+                            "Config file has unsafe permissions, run: chmod 600 <config>",
+                        ));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+            toml::from_str(&std::fs::read_to_string(path)?)?
+        }
         None => Config {
             ..Default::default()
         },
