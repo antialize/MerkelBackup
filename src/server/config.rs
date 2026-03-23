@@ -109,6 +109,27 @@ pub fn parse_config() -> Config {
     let args = Args::parse();
     let mut config: Config = match args.config {
         Some(path) => {
+            // Refuse to load a config file that is readable by group or other,
+            // since it contains plaintext passwords.
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = meta.permissions().mode();
+                    if mode & 0o077 != 0 {
+                        error!(
+                            "Config file {path:?} has unsafe permissions ({mode:04o}). \
+                            Run: chmod 600 {path:?}",
+                            path = path,
+                            mode = mode & 0o777
+                        );
+                        std::process::exit(1)
+                    }
+                }
+                Err(e) => {
+                    error!("Unable to stat config file {path:?}: {e:?}");
+                    std::process::exit(1)
+                }
+            }
             let data = match std::fs::read_to_string(&path) {
                 Ok(data) => data,
                 Err(e) => {
