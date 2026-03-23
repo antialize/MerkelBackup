@@ -552,12 +552,42 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         )",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS remote_server (
+            server TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    // Check if the server changed since last backup, if so clear the remote cache
+    match conn.query_one("SELECT server FROM remote_server", [], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(v) if v != config.server => {
+            error!("Remote server changed, clearing remote cache");
+            conn.execute("DELETE FROM remote", [])?;
+            conn.execute("DELETE FROM remote_server", [])?;
+            conn.execute(
+                "INSERT INTO remote_server (server) VALUES (?)",
+                params![config.server],
+            )?;
+        }
+        Ok(_) => (),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // No server stored, insert the current one
+            conn.execute(
+                "INSERT INTO remote_server (server) VALUES (?)",
+                params![config.server],
+            )?;
+        }
+        Err(e) => return Err(Error::Sql(e)),
+    };
 
     let mut state = State {
         secrets,
         config,
         client: reqwest::blocking::ClientBuilder::new()
-            .timeout(Duration::from_secs(60 * 4)) // Increase timout from default 30 seconds to 5 minutes
+            .timeout(Duration::from_secs(60 * 4)) // Increase timeout from default 30 seconds to 5 minutes
             .no_brotli()
             .no_deflate()
             .no_gzip()
