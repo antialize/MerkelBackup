@@ -2,7 +2,7 @@
 edition = "2024"
 
 name = "mbackup"
-version = "0.2.1"
+version = "0.2.2"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]

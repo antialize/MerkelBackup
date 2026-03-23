@@ -1099,7 +1099,7 @@ pub fn run_prune(
                 }
                 !keep
             } else if let Some(age) = age {
-                root.time + 60 * 60 * 24 * i64::from(age) < now
+                root.time + 60 * 60 * 24 * i64::from(age) <= now
             } else {
                 false
             };
