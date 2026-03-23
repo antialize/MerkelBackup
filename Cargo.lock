@@ -1132,6 +1132,7 @@ dependencies = [
  "rust-lzma",
  "sd-notify",
  "serde",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "toml",

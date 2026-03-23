@@ -9,6 +9,7 @@ use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -90,12 +91,12 @@ fn check_auth<'a>(
     };
 
     for user in state.config.users.iter() {
-        if format!(
+        let expected = format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD
                 .encode(format!("{}:{}", user.name, user.password))
-        ) != auth
-        {
+        );
+        if !bool::from(expected.as_bytes().ct_eq(auth.as_bytes())) {
             continue;
         }
         if level != AccessType::Get && user.max_root_age.is_some() {
