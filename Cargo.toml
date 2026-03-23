@@ -2,7 +2,7 @@
 edition = "2024"
 
 name = "mbackup"
-version = "0.2.0"
+version = "0.2.1"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
@@ -32,7 +32,7 @@ members = ["merkel_backup_plugin"]
 
 [dependencies]
 log = "0.4"
-rusqlite = {version = "0.38", features = ["bundled", "fallible_uint"] }
+rusqlite = {version = "0.39", features = ["bundled", "fallible_uint"] }
 rand = {version = "0.10", default-features = false, features = ["sys_rng"] }
 reqwest = {version = "0.13", features=["blocking", "rustls", "charset"], default-features=false}
 hex = "0.4"
