@@ -756,7 +756,14 @@ async fn handle_put_root(
         "Bad bucket"
     );
 
-    if host.contains('\0') {
+    // Max hostname length per RFC 1035 is 253 characters.
+    // Only allow alphanumeric characters, hyphens, and dots.
+    if host.is_empty()
+        || host.len() > 253
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
         return handle_error!(StatusCode::BAD_REQUEST, "Bad host name", "");
     }
 
