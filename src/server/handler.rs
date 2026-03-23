@@ -836,7 +836,23 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
             );
         }
     };
-    if req.uri().query() != Some(token.as_str()) {
+
+    // Accept the token either as a Bearer token in the Authorization header
+    // (preferred, avoids the token appearing in logs) or as a query parameter
+    // (legacy). Both paths use constant-time comparison.
+    let bearer = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let provided: Option<&str> = bearer.or_else(|| req.uri().query());
+
+    let authorized = provided
+        .map(|p| bool::from(p.as_bytes().ct_eq(token.as_bytes())))
+        .unwrap_or(false);
+
+    if !authorized {
         return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
     }
 
