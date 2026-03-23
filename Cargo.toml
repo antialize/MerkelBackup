@@ -2,7 +2,7 @@
 edition = "2024"
 
 name = "mbackup"
-version = "0.2.1"
+version = "0.2.2"
 authors = [ "Jakob Truelsen <jakob@scalgo.com>" ]
 
 [[bin]]
@@ -56,5 +56,6 @@ cipher = "0.5"
 http-body-util = "0.1"
 hyper-util = "0.1"
 thiserror = "2"
+subtle = "2"
 abi_stable = {version="0.11.3", default-features = false}
 merkel_backup_plugin = {path = "merkel_backup_plugin"}

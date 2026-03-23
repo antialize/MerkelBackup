@@ -9,6 +9,7 @@ use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 use crate::config::{AccessType, Config, SMALL_SIZE};
 use crate::error::{Error, ResponseFuture, Result};
@@ -90,12 +91,12 @@ fn check_auth<'a>(
     };
 
     for user in state.config.users.iter() {
-        if format!(
+        let expected = format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD
                 .encode(format!("{}:{}", user.name, user.password))
-        ) != auth
-        {
+        );
+        if !bool::from(expected.as_bytes().ct_eq(auth.as_bytes())) {
             continue;
         }
         if level != AccessType::Get && user.max_root_age.is_some() {
@@ -755,7 +756,14 @@ async fn handle_put_root(
         "Bad bucket"
     );
 
-    if host.contains('\0') {
+    // Max hostname length per RFC 1035 is 253 characters.
+    // Only allow alphanumeric characters, hyphens, and dots.
+    if host.is_empty()
+        || host.len() > 253
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
         return handle_error!(StatusCode::BAD_REQUEST, "Bad host name", "");
     }
 
@@ -825,9 +833,33 @@ async fn handle_delete_root(
 }
 
 async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
-    if let Some(token) = &state.config.metrics_token
-        && req.uri().query() != Some(token.as_str())
-    {
+    let token = match &state.config.metrics_token {
+        Some(t) => t,
+        None => {
+            return handle_error!(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "Metrics token not configured"
+            );
+        }
+    };
+
+    // Accept the token either as a Bearer token in the Authorization header
+    // (preferred, avoids the token appearing in logs) or as a query parameter
+    // (legacy). Both paths use constant-time comparison.
+    let bearer = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let provided: Option<&str> = bearer.or_else(|| req.uri().query());
+
+    let authorized = provided
+        .map(|p| bool::from(p.as_bytes().ct_eq(token.as_bytes())))
+        .unwrap_or(false);
+
+    if !authorized {
         return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
     }
 
@@ -930,37 +962,6 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
     ok_message(Some(ans))
 }
 
-async fn handle_get_mirror(_req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
-    let mut bit: u8 = 1;
-    let mut val: u8 = 0;
-    let mut nid: i64 = 0;
-    let mut ans = String::new();
-
-    let conn = state.conn.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
-
-    for row in stmt.query_map([], |row| row.get(0)).unwrap() {
-        let id: i64 = row.expect("Unable to read db row");
-        while nid <= id {
-            if bit == 127 {
-                ans.push((48 + val) as char);
-                bit = 0;
-                val = 0;
-            }
-            if id == nid {
-                val += bit
-            }
-            bit *= 2;
-            nid += 1;
-        }
-    }
-    if val != 0 {
-        ans.push((48 + val) as char);
-    }
-
-    ok_message(None)
-}
-
 pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
     let path: Vec<String> = req
         .uri()
@@ -990,8 +991,6 @@ pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> Response
         handle_delete_root(path[2].clone(), path[3].clone(), req, state).await
     } else if req.method() == Method::GET && path.len() == 2 && path[1] == "metrics" {
         handle_get_metrics(req, state).await
-    } else if req.method() == Method::GET && path.len() == 2 && path[1] == "mirror" {
-        handle_get_mirror(req, state).await
     } else {
         handle_error!(StatusCode::NOT_FOUND, "Not found", req.uri())
     }
