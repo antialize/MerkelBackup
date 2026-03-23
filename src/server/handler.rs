@@ -826,9 +826,17 @@ async fn handle_delete_root(
 }
 
 async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> ResponseFuture {
-    if let Some(token) = &state.config.metrics_token
-        && req.uri().query() != Some(token.as_str())
-    {
+    let token = match &state.config.metrics_token {
+        Some(t) => t,
+        None => {
+            return handle_error!(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "Metrics token not configured"
+            );
+        }
+    };
+    if req.uri().query() != Some(token.as_str()) {
         return handle_error!(StatusCode::FORBIDDEN, "Forbidden", "Missing metrics token");
     }
 
