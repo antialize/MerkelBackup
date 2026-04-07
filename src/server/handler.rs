@@ -464,6 +464,77 @@ fn do_delete_chunks(
     Ok(count)
 }
 
+/// Check which chunks from a submitted list exist in the archive.
+/// Request body: null-delimited list of chunk hashes.
+/// Response body: null-delimited list of hashes that exist.
+async fn handle_has_chunks(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
+        warn!("Unauthorized access for has chunks {bucket}");
+        return res;
+    }
+
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+
+    let mut v = Vec::new();
+    let mut body = req.into_body();
+    while let Some(frame) = body.frame().await {
+        let chunk = match frame?.into_data() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        v.extend_from_slice(&chunk);
+        if v.len() >= 1024 * 1024 {
+            return handle_error!(StatusCode::BAD_REQUEST, "Too much data", "");
+        }
+    }
+
+    let s = tryfut!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad chunks");
+    if s.is_empty() {
+        return ok_message(Some(String::new()));
+    }
+    let chunks: Vec<&str> = s.split('\0').collect();
+    for chunk in chunks.iter() {
+        tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad chunk");
+    }
+
+    let existing = tryfut!(
+        do_has_chunks(&mut state.conn.lock().unwrap(), &bucket, &chunks),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_has_chunks failed"
+    );
+    ok_message(Some(existing))
+}
+
+fn do_has_chunks(conn: &mut rusqlite::Connection, bucket: &str, chunks: &[&str]) -> Result<String> {
+    debug_assert!(!chunks.is_empty());
+    let mut params: Vec<&str> = vec![bucket];
+    for chunk in chunks {
+        params.push(chunk);
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT hash FROM chunks WHERE bucket=? AND hash IN (?{})",
+        ", ?".repeat(chunks.len() - 1)
+    ))?;
+
+    let mut ans = String::new();
+    for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))? {
+        let hash: String = row?;
+        if !ans.is_empty() {
+            ans.push('\0');
+        }
+        ans.push_str(&hash);
+    }
+    Ok(ans)
+}
+
 async fn handle_delete_chunk(
     bucket: String,
     chunk: String,
@@ -986,6 +1057,8 @@ pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> Response
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false).await
     } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "chunks" {
         handle_put_chunk(path[2].clone(), path[3].clone(), req, state).await
+    } else if req.method() == Method::POST && path.len() == 3 && path[1] == "chunks" {
+        handle_has_chunks(path[2].clone(), req, state).await
     } else if req.method() == Method::DELETE && path.len() == 3 && path[1] == "chunks" {
         handle_delete_chunks(path[2].clone(), req, state).await
     } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "chunks" {
