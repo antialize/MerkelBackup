@@ -20,3 +20,5 @@ jobs:
       run: cargo fmt -- --check
     - name: Clippy
       run: cargo clippy -- --no-deps -Dwarnings
+    - name: Integration tests
+      run: python3 test.py
