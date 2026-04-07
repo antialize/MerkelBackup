@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_config();
     log::set_max_level(config.verbosity.into());
 
+    info!("mbackupd version {}", env!("CARGO_PKG_VERSION"));
     debug!("Config {config:?}");
     let conn = Mutex::new(setup_db(&config));
     let state = Arc::new(State {
