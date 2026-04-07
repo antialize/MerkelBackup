@@ -138,6 +138,49 @@ fn chunk_path(data_dir: &str, bucket: &str, chunk: &str) -> String {
     )
 }
 
+/// Write a large chunk to disk via a temp file + atomic rename and record it in the DB.
+/// Uses INSERT OR IGNORE so callers that have already verified non-existence and callers
+/// that haven't are both safe. Returns true if a new row was inserted.
+fn store_chunk_on_disk(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    bucket: &str,
+    hash: &str,
+    data: &[u8],
+) -> Result<bool> {
+    std::fs::create_dir_all(format!("{}/data/upload/{}", config.data_dir, bucket))
+        .map_err(|_| Error::Server("Could not create upload folder"))?;
+    let temp_path = format!(
+        "{}/data/upload/{}/{}_{}",
+        config.data_dir,
+        bucket,
+        hash,
+        SysRng.try_next_u64()?
+    );
+    std::fs::write(&temp_path, data).map_err(|_| Error::Server("Write failed"))?;
+    std::fs::create_dir_all(format!(
+        "{}/data/{}/{}",
+        config.data_dir,
+        bucket,
+        &hash[..2]
+    ))
+    .map_err(|_| Error::Server("Could not create bucket folder"))?;
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO chunks (bucket, hash, size, time, has_content) \
+         VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
+        params![bucket, hash, data.len() as i64],
+    )?;
+    if inserted > 0 {
+        if std::fs::rename(&temp_path, chunk_path(&config.data_dir, bucket, hash)).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(Error::Server("Move failed"));
+        }
+    } else {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    Ok(inserted > 0)
+}
+
 /// Put a chunk into the chunk archive
 async fn handle_put_chunk(
     bucket: String,
@@ -210,48 +253,16 @@ async fn handle_put_chunk(
         );
     } else {
         state.stat.put_chunk_large.inc();
-        // Large content is stored on disk. We first store the data in a temp upload folder
-        // and then atomically rename into its right location
         tryfut!(
-            std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create upload folder"
-        );
-        let temp_path = format!(
-            "{}/data/upload/{}/{}_{}",
-            state.config.data_dir,
-            bucket,
-            chunk,
-            SysRng.try_next_u64()?
-        );
-        tryfut!(
-            std::fs::write(&temp_path, v),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Write failed"
-        );
-        tryfut!(
-            std::fs::create_dir_all(format!(
-                "{}/data/{}/{}",
-                state.config.data_dir,
+            store_chunk_on_disk(
+                &mut state.conn.lock().unwrap(),
+                &state.config,
                 &bucket,
-                &chunk[..2]
-            )),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create bucket folder"
-        );
-        {
-            let conn = state.conn.lock().unwrap();
-            tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
-                params![&bucket, &chunk, len as i64]),
-                StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
-        }
-        tryfut!(
-            std::fs::rename(
-                &temp_path,
-                chunk_path(&state.config.data_dir, &bucket, &chunk)
+                &chunk,
+                &v,
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Move failed"
+            "Store chunk on disk failed"
         );
     }
     info!("{}:{}: put chunk {} success", file!(), line!(), chunk);
