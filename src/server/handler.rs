@@ -499,21 +499,28 @@ async fn handle_put_chunks(
         }
     }
 
-    let count = tryfut!(
+    let (already_there, small_inserted, large_inserted) = tryfut!(
         do_put_chunks(&mut state.conn.lock().unwrap(), &state.config, &bucket, &v),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_put_chunks failed"
     );
     state.stat.put_chunks_count.inc();
     state.stat.put_chunk_bytes.add(v.len());
+    state.stat.put_chunk_already_there.add(already_there);
+    state.stat.put_chunk_small.add(small_inserted);
+    state.stat.put_chunk_large.add(large_inserted);
+    let total_inserted = small_inserted + large_inserted;
     info!(
-        "{}:{}: put chunks {} inserted {} chunks",
+        "{}:{}: put chunks {} inserted {} chunks ({} small, {} large, {} already there)",
         file!(),
         line!(),
         bucket,
-        count
+        total_inserted,
+        small_inserted,
+        large_inserted,
+        already_there
     );
-    ok_message(Some(format!("{count}")))
+    ok_message(Some(format!("{total_inserted}")))
 }
 
 fn do_put_chunks(
@@ -521,7 +528,7 @@ fn do_put_chunks(
     config: &Config,
     bucket: &str,
     data: &[u8],
-) -> Result<usize> {
+) -> Result<(usize, usize, usize)> {
     // First pass: parse all records and validate, collecting what needs inserting.
     struct ChunkRecord<'d> {
         hash: String,
@@ -575,7 +582,8 @@ fn do_put_chunks(
         // `exists_stmt` dropped here, releasing the borrow on `conn`.
     }
 
-    let mut count = 0;
+    let mut small_inserted = 0;
+    let mut large_inserted = 0;
 
     // Batch-insert all small chunks in one transaction.
     if !small.is_empty() {
@@ -592,7 +600,7 @@ fn do_put_chunks(
                     "INSERT OR IGNORE INTO chunk_content (chunk_id, content) VALUES (?, ?)",
                     params![id, rec.data],
                 )?;
-                count += 1;
+                small_inserted += 1;
             }
         }
         tx.commit()?;
@@ -601,11 +609,12 @@ fn do_put_chunks(
     // Insert large chunks via temp-file + rename.
     for rec in &large {
         if store_chunk_on_disk(conn, config, bucket, &rec.hash, rec.data)? {
-            count += 1;
+            large_inserted += 1;
         }
     }
 
-    Ok(count)
+    let already_there = records.len() - small_inserted - large_inserted;
+    Ok((already_there, small_inserted, large_inserted))
 }
 
 /// Check which chunks from a submitted list exist in the archive.
