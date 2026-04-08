@@ -403,7 +403,7 @@ fn do_get_chunk(
 
 fn do_delete_chunks(
     conn: &mut rusqlite::Connection,
-    bucket: String,
+    bucket: &str,
     chunks: &[&str],
     config: &Config,
 ) -> Result<usize> {
@@ -411,7 +411,7 @@ fn do_delete_chunks(
         return Ok(0);
     }
 
-    let mut params: Vec<&str> = vec![&bucket];
+    let mut params: Vec<&str> = vec![bucket];
     for chunk in chunks {
         params.push(chunk)
     }
@@ -430,7 +430,7 @@ fn do_delete_chunks(
         if has_content {
             internal_chunks.push(id);
         } else {
-            let path = chunk_path(&config.data_dir, &bucket, &chunk);
+            let path = chunk_path(&config.data_dir, bucket, &chunk);
             match std::fs::remove_file(path) {
                 Ok(_) => (),
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -504,7 +504,15 @@ async fn handle_put_chunks(
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_put_chunks failed"
     );
+    state.stat.put_chunks_count.inc();
     state.stat.put_chunk_bytes.add(v.len());
+    info!(
+        "{}:{}: put chunks {} inserted {} chunks",
+        file!(),
+        line!(),
+        bucket,
+        count
+    );
     ok_message(Some(format!("{count}")))
 }
 
@@ -641,6 +649,7 @@ async fn handle_has_chunks(
         tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad chunk");
     }
 
+    state.stat.has_chunks_count.inc();
     let existing = tryfut!(
         do_has_chunks(&mut state.conn.lock().unwrap(), &bucket, &chunks),
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -698,7 +707,7 @@ async fn handle_delete_chunk(
     let count = tryfut!(
         do_delete_chunks(
             &mut state.conn.lock().unwrap(),
-            bucket,
+            &bucket,
             std::slice::from_ref(&chu),
             &state.config
         ),
@@ -709,6 +718,7 @@ async fn handle_delete_chunk(
     if count != 1 {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
+    info!("{}:{}: delete chunk {} success", file!(), line!(), chunk);
     ok_message(None)
 }
 
@@ -751,7 +761,7 @@ async fn handle_delete_chunks(
     let count = tryfut!(
         do_delete_chunks(
             &mut state.conn.lock().unwrap(),
-            bucket,
+            &bucket,
             &chunks,
             &state.config
         ),
@@ -762,6 +772,13 @@ async fn handle_delete_chunks(
     if count != chunks.len() {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
+    info!(
+        "{}:{}: delete chunks {} deleted {} chunks",
+        file!(),
+        line!(),
+        bucket,
+        count
+    );
     ok_message(None)
 }
 
@@ -1018,6 +1035,13 @@ async fn handle_put_root(
                 "Insert failed",
             );
     }
+    info!(
+        "{}:{}: put root {}/{} success",
+        file!(),
+        line!(),
+        bucket,
+        host
+    );
     ok_message(None)
 }
 
@@ -1046,7 +1070,16 @@ async fn handle_delete_root(
     match res {
         Err(e) => handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Query failed", e),
         Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
-        Ok(_) => ok_message(None),
+        Ok(_) => {
+            info!(
+                "{}:{}: delete root {}/{} success",
+                file!(),
+                line!(),
+                bucket,
+                root
+            );
+            ok_message(None)
+        }
     }
 }
 
@@ -1103,6 +1136,8 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
         (&s.delete_chunks_count, "delete_chunks_count_total"),
         (&s.chunks_deleted, "chunks_deleted_total"),
         (&s.delete_chunk_count, "delete_chunk_count_total"),
+        (&s.has_chunks_count, "has_chunks_count_total"),
+        (&s.put_chunks_count, "put_chunks_count_total"),
     ]
     .iter()
     {

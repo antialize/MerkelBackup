@@ -82,6 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             delete_chunks_count: Default::default(),
             chunks_deleted: Default::default(),
             delete_chunk_count: Default::default(),
+            has_chunks_count: Default::default(),
+            put_chunks_count: Default::default(),
             start_time: std::time::SystemTime::now(),
         },
     });
