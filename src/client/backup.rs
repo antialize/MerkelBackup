@@ -117,6 +117,40 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
     }
 }
 
+/// Check whether all chunks from `chunks` exist on the server in a single HTTP request.
+/// Returns true if the server confirmed it has all of them.
+fn has_chunks_remote(chunks: &[&str], state: &mut State) -> Result<bool, Error> {
+    debug_assert!(!chunks.is_empty());
+    let url = format!(
+        "{}/chunks/{}",
+        &state.config.server,
+        hex::encode(state.secrets.bucket),
+    );
+    let body = chunks.join("\0");
+    let res = retry(&mut || {
+        state
+            .client
+            .post(&url)
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .body(body.clone())
+            .send()
+    })?;
+    match res.status() {
+        reqwest::StatusCode::OK => {
+            let text = res.text()?;
+            // The response is a null-delimited list of found hashes.
+            // If all were found, the count of entries equals the count we sent.
+            let found = if text.is_empty() {
+                0
+            } else {
+                text.split('\0').count()
+            };
+            Ok(found == chunks.len())
+        }
+        code => Err(Error::HttpStatus(code)),
+    }
+}
+
 impl<'a> State<'a> {
     fn get_chunks_impl(
         &mut self,
@@ -177,14 +211,32 @@ impl<'a> BackupContext for State<'a> {
     }
 
     fn has_chunks(&mut self, chunks: RStr) -> PResult<bool> {
-        for chunk in chunks.split(",") {
-            match has_chunk(chunk, self, None) {
-                Ok(HasChunkResult::No) => return ROk(false),
-                Ok(_) => (),
-                Err(e) => return RErr(RBoxError::new(e)),
+        let chunk_list: Vec<&str> = chunks.split(",").collect();
+        let mut uncached: Vec<&str> = Vec::new();
+        for &chunk in &chunk_list {
+            let mut rows = match self.has_remote_stmt.query(params![chunk]) {
+                Ok(r) => r,
+                Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+            };
+            let cnt: i64 = match rows.next() {
+                Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+                Ok(None) => return RErr(RBoxError::new(Error::MissingRow())),
+                Ok(Some(row)) => match row.get(0) {
+                    Ok(v) => v,
+                    Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+                },
+            };
+            if cnt == 0 {
+                uncached.push(chunk);
             }
         }
-        ROk(true)
+        if uncached.is_empty() {
+            return ROk(true);
+        }
+        match has_chunks_remote(&uncached, self) {
+            Ok(all_found) => ROk(all_found),
+            Err(e) => RErr(RBoxError::new(e)),
+        }
     }
 
     fn push_chunk(&mut self, content: RSlice<u8>) -> PResult<RString> {
