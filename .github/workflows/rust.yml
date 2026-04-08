@@ -1,4 +1,7 @@
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+  pull_request:
 name: RUST Continuous integration
 
 env:
@@ -20,3 +23,32 @@ jobs:
       run: cargo fmt -- --check
     - name: Clippy
       run: cargo clippy -- --no-deps -Dwarnings
+    - name: Integration tests
+      run: python3 test.py
+
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Log in to GitHub Container Registry
+      if: github.event_name == 'push'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Build (and push on push events)
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: ${{ github.event_name == 'push' }}
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/merkelbackup:latest
+          ghcr.io/${{ github.repository_owner }}/merkelbackup:${{ github.sha }}
+        build-args: |
+          GIT_COMMIT=${{ github.sha }}
+          GIT_COMMIT_FULL=${{ github.sha }}
+          GIT_BRANCH=${{ github.ref_name }}

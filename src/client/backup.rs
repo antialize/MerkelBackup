@@ -35,6 +35,13 @@ use rusqlite::{Connection, Statement, params};
 use merkel_backup_plugin::Result as PResult;
 
 const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+// Chunks with an encrypted size below this threshold are deferred and sent
+// via the batch PUT /chunks/{bucket} endpoint instead of individual PUTs.
+// The server stores chunks below its own SMALL_SIZE in SQLite and larger ones
+// on disk; the batch endpoint handles both, so this threshold is independent.
+const BATCH_UPLOAD_MAX_ENCRYPTED: usize = 64 * 1024 + 12;
+// Flush the pending batch whenever this many bytes have accumulated.
+const BATCH_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirEnt {
@@ -70,6 +77,10 @@ struct State<'a> {
     plugin: RCowStr<'static>,
     plugin_name: RCowStr<'static>,
     plugin_entries: Vec<String>,
+    pending_verify: std::collections::HashSet<String>,
+    /// Encrypted small chunks deferred for batch upload: hash -> (encrypted_data, original_content_len)
+    pending_small_uploads: std::collections::HashMap<String, (Vec<u8>, usize)>,
+    pending_small_size: usize,
 }
 
 #[derive(PartialEq)]
@@ -113,6 +124,63 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
     match res.status() {
         reqwest::StatusCode::OK => Ok(HasChunkResult::Yes),
         reqwest::StatusCode::NOT_FOUND => Ok(HasChunkResult::No),
+        code => Err(Error::HttpStatus(code)),
+    }
+}
+
+/// Result of a has_chunks_remote() call: the subset of queried chunks that were found to exist on the server.
+struct ChunksResult(String);
+/// Iterator over the individual chunk hashes in a ChunksResult.
+struct ChunksResultIter<'a>(&'a str);
+
+impl ChunksResult {
+    /// Split the result string into individual chunk hashes.
+    fn iter<'a>(&'a self) -> ChunksResultIter<'a> {
+        ChunksResultIter(&self.0)
+    }
+}
+
+impl<'a> Iterator for ChunksResultIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        if let Some((f, r)) = self.0.split_once('\0') {
+            self.0 = r;
+            Some(f)
+        } else {
+            let item = self.0;
+            self.0 = "";
+            Some(item)
+        }
+    }
+}
+
+/// Check whether all chunks from `chunks` exist on the server in a single HTTP request.
+/// Returns the subset of `chunks` that were found to exist on the server.
+fn has_chunks_remote(chunks: &[&str], state: &mut State) -> Result<ChunksResult, Error> {
+    debug_assert!(!chunks.is_empty());
+    let url = format!(
+        "{}/chunks/{}",
+        &state.config.server,
+        hex::encode(state.secrets.bucket),
+    );
+    let body = chunks.join("\0");
+    let res = retry(&mut || {
+        state
+            .client
+            .post(&url)
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .body(body.clone())
+            .send()
+    })?;
+    match res.status() {
+        reqwest::StatusCode::OK => {
+            let text = res.text()?;
+            Ok(ChunksResult(text))
+        }
         code => Err(Error::HttpStatus(code)),
     }
 }
@@ -177,14 +245,38 @@ impl<'a> BackupContext for State<'a> {
     }
 
     fn has_chunks(&mut self, chunks: RStr) -> PResult<bool> {
-        for chunk in chunks.split(",") {
-            match has_chunk(chunk, self, None) {
-                Ok(HasChunkResult::No) => return ROk(false),
-                Ok(_) => (),
-                Err(e) => return RErr(RBoxError::new(e)),
+        let chunk_list: Vec<&str> = chunks.split(",").collect();
+        let mut uncached: Vec<&str> = Vec::new();
+        for &chunk in &chunk_list {
+            let mut rows = match self.has_remote_stmt.query(params![chunk]) {
+                Ok(r) => r,
+                Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+            };
+            let cnt: i64 = match rows.next() {
+                Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+                Ok(None) => return RErr(RBoxError::new(Error::MissingRow())),
+                Ok(Some(row)) => match row.get(0) {
+                    Ok(v) => v,
+                    Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+                },
+            };
+            if cnt == 0 {
+                uncached.push(chunk);
             }
         }
-        ROk(true)
+        if uncached.is_empty() {
+            return ROk(true);
+        }
+        if self.scan {
+            for c in &uncached {
+                self.pending_verify.insert(c.to_string());
+            }
+            return ROk(true); // optimistic during scan; verified in batch after scan completes
+        }
+        match has_chunks_remote(&uncached, self) {
+            Ok(r) => ROk(r.iter().count() == uncached.len()),
+            Err(e) => RErr(RBoxError::new(e)),
+        }
     }
 
     fn push_chunk(&mut self, content: RSlice<u8>) -> PResult<RString> {
@@ -228,13 +320,6 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     let t1 = now.elapsed().as_millis();
     let mut t2 = t1;
     if hc == HasChunkResult::No {
-        let url = format!(
-            "{}/chunks/{}/{}",
-            &state.config.server,
-            hex::encode(state.secrets.bucket),
-            &hash
-        );
-
         let mut crypted = vec![0; content.len() + 12];
         state.rng.try_fill_bytes(&mut crypted[..12])?;
 
@@ -243,6 +328,29 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
             .apply_keystream_b2b(content, &mut crypted[12..]);
         t2 = now.elapsed().as_millis();
 
+        if crypted.len() < BATCH_UPLOAD_MAX_ENCRYPTED {
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                state.pending_small_uploads.entry(hash.clone())
+            {
+                // Defer small chunk: batch it up and send later to avoid per-file HTTP overhead.
+                state.pending_small_size += crypted.len();
+                e.insert((crypted, content.len()));
+                if state.pending_small_size >= BATCH_FLUSH_BYTES {
+                    flush_pending_uploads(state)?;
+                }
+            } else {
+                state.skipped_bytes += content.len();
+            }
+            // remote cache and progress updated by flush_pending_uploads
+            return Ok(hash);
+        }
+
+        let url = format!(
+            "{}/chunks/{}/{}",
+            &state.config.server,
+            hex::encode(state.secrets.bucket),
+            &hash
+        );
         let res = retry(&mut || {
             state
                 .client
@@ -285,6 +393,61 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
     Ok(hash)
 }
 
+/// Flush all deferred small-chunk uploads in a single batch PUT request.
+fn flush_pending_uploads(state: &mut State) -> Result<(), Error> {
+    if state.pending_small_uploads.is_empty() {
+        return Ok(());
+    }
+    let bucket = hex::encode(state.secrets.bucket);
+    let url = format!("{}/chunks/{}", &state.config.server, bucket);
+
+    // Build binary body: for each chunk: [64-char hash][\0][4-byte LE size][encrypted data]
+    let body = {
+        let pending = &state.pending_small_uploads;
+        let mut b = Vec::with_capacity(pending.values().map(|(d, _)| 69 + d.len()).sum());
+        for (hash, (data, _)) in pending {
+            b.extend_from_slice(hash.as_bytes());
+            b.push(b'\0');
+            b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            b.extend_from_slice(data);
+        }
+        b
+    };
+
+    let res = retry(&mut || {
+        state
+            .client
+            .put(&url)
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .body(body.clone())
+            .send()
+    })?;
+    match res.status() {
+        reqwest::StatusCode::OK => (),
+        code => return Err(Error::HttpStatus(code)),
+    }
+
+    // Request succeeded — now drain the pending list.
+    let pending = std::mem::take(&mut state.pending_small_uploads);
+    state.pending_small_size = 0;
+
+    let total_original: usize = pending.values().map(|(_, orig)| orig).sum();
+    let total_encrypted: usize = pending.values().map(|(d, _)| d.len()).sum();
+    state.transfered_bytes += total_encrypted;
+    for (hash, (_, orig_len)) in &pending {
+        state.update_remote_stmt.execute(params![hash])?;
+        if let Some(p) = &mut state.progress {
+            p.add(*orig_len as u64);
+        }
+    }
+    info!(
+        "Batch uploaded {} small chunks ({} bytes)",
+        pending.len(),
+        total_original
+    );
+    Ok(())
+}
+
 fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<String, Error> {
     let path_str = path
         .to_str()
@@ -315,13 +478,29 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
             }
         };
         if let Some(chunks) = chunks {
-            let mut good = true;
-            for chunk in chunks.split(',') {
-                if has_chunk(chunk, state, None)? == HasChunkResult::No {
-                    good = false;
-                    break;
+            let chunk_list: Vec<&str> = chunks.split(',').collect();
+            let mut uncached = Vec::new();
+            for chunk in &chunk_list {
+                let cnt: i64 = state
+                    .has_remote_stmt
+                    .query(params![chunk])?
+                    .next()?
+                    .ok_or(Error::MissingRow())?
+                    .get(0)?;
+                if cnt == 0 {
+                    uncached.push(*chunk);
                 }
             }
+            let good = uncached.is_empty() || {
+                if state.scan {
+                    for c in &uncached {
+                        state.pending_verify.insert(c.to_string());
+                    }
+                    true // optimistic during scan; verified in batch after scan completes
+                } else {
+                    has_chunks_remote(&uncached, state).iter().count() == uncached.len()
+                }
+            };
             if good {
                 return Ok(chunks);
             }
@@ -527,6 +706,31 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
+/// Batch-verify the chunk hashes currently accumulated in `pending_verify`
+/// against the server and populate the local remote cache for any hashes
+/// that exist remotely.
+/// This avoids per-file network round-trips for many small files by verifying
+/// queued hashes in batches of up to 900 per POST, after which `has_chunk()`
+/// can check chunk existence using only the local DB.
+fn flush_pending_verify(state: &mut State) -> Result<(), Error> {
+    let chunks: Vec<String> = state.pending_verify.drain().collect();
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    info!("Batch-verifying {} chunks against server", chunks.len());
+    // SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; do_has_chunks binds
+    // chunks.len() + 1 params (bucket), so the safe ceiling is 998. Use 900.
+    const BATCH_SIZE: usize = 900;
+    for batch in chunks.chunks(BATCH_SIZE) {
+        let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
+        let found = has_chunks_remote(&refs, state)?;
+        for hash in found.iter() {
+            state.update_remote_stmt.execute(params![hash])?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Result<(), Error> {
     let t1 = SystemTime::now();
 
@@ -613,6 +817,9 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         plugin_entries: Vec::new(),
         plugin: RCowStr::from_str(""),
         plugin_name: RCowStr::from_str(""),
+        pending_verify: std::collections::HashSet::new(),
+        pending_small_uploads: std::collections::HashMap::new(),
+        pending_small_size: 0,
     };
 
     update_remote(&conn, &mut state)?;
@@ -656,6 +863,7 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
 
     state.entries.clear();
     state.plugin_entries.clear();
+    flush_pending_verify(&mut state)?;
     state.scan = false;
     for dir in dirs.iter() {
         let path = Path::new(dir);
@@ -727,6 +935,10 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     }
 
     let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
+
+    // Flush any remaining deferred small-chunk uploads (including the root manifest
+    // if it was small enough to be deferred) before registering the root with the server.
+    flush_pending_uploads(&mut state)?;
 
     let url = format!(
         "{}/roots/{}/{}",

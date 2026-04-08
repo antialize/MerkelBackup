@@ -138,6 +138,49 @@ fn chunk_path(data_dir: &str, bucket: &str, chunk: &str) -> String {
     )
 }
 
+/// Write a large chunk to disk via a temp file + atomic rename and record it in the DB.
+/// Uses INSERT OR IGNORE so callers that have already verified non-existence and callers
+/// that haven't are both safe. Returns true if a new row was inserted.
+fn store_chunk_on_disk(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    bucket: &str,
+    hash: &str,
+    data: &[u8],
+) -> Result<bool> {
+    std::fs::create_dir_all(format!("{}/data/upload/{}", config.data_dir, bucket))
+        .map_err(|_| Error::Server("Could not create upload folder"))?;
+    let temp_path = format!(
+        "{}/data/upload/{}/{}_{}",
+        config.data_dir,
+        bucket,
+        hash,
+        SysRng.try_next_u64()?
+    );
+    std::fs::write(&temp_path, data).map_err(|_| Error::Server("Write failed"))?;
+    std::fs::create_dir_all(format!(
+        "{}/data/{}/{}",
+        config.data_dir,
+        bucket,
+        &hash[..2]
+    ))
+    .map_err(|_| Error::Server("Could not create bucket folder"))?;
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO chunks (bucket, hash, size, time, has_content) \
+         VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
+        params![bucket, hash, data.len() as i64],
+    )?;
+    if inserted > 0 {
+        if std::fs::rename(&temp_path, chunk_path(&config.data_dir, bucket, hash)).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(Error::Server("Move failed"));
+        }
+    } else {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    Ok(inserted > 0)
+}
+
 /// Put a chunk into the chunk archive
 async fn handle_put_chunk(
     bucket: String,
@@ -210,48 +253,16 @@ async fn handle_put_chunk(
         );
     } else {
         state.stat.put_chunk_large.inc();
-        // Large content is stored on disk. We first store the data in a temp upload folder
-        // and then atomically rename into its right location
         tryfut!(
-            std::fs::create_dir_all(format!("{}/data/upload/{}", state.config.data_dir, &bucket)),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create upload folder"
-        );
-        let temp_path = format!(
-            "{}/data/upload/{}/{}_{}",
-            state.config.data_dir,
-            bucket,
-            chunk,
-            SysRng.try_next_u64()?
-        );
-        tryfut!(
-            std::fs::write(&temp_path, v),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Write failed"
-        );
-        tryfut!(
-            std::fs::create_dir_all(format!(
-                "{}/data/{}/{}",
-                state.config.data_dir,
+            store_chunk_on_disk(
+                &mut state.conn.lock().unwrap(),
+                &state.config,
                 &bucket,
-                &chunk[..2]
-            )),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not create bucket folder"
-        );
-        {
-            let conn = state.conn.lock().unwrap();
-            tryfut!(conn.execute("INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
-                params![&bucket, &chunk, len as i64]),
-                StatusCode::INTERNAL_SERVER_ERROR, "Insert failed");
-        }
-        tryfut!(
-            std::fs::rename(
-                &temp_path,
-                chunk_path(&state.config.data_dir, &bucket, &chunk)
+                &chunk,
+                &v,
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Move failed"
+            "Store chunk on disk failed"
         );
     }
     info!("{}:{}: put chunk {} success", file!(), line!(), chunk);
@@ -392,7 +403,7 @@ fn do_get_chunk(
 
 fn do_delete_chunks(
     conn: &mut rusqlite::Connection,
-    bucket: String,
+    bucket: &str,
     chunks: &[&str],
     config: &Config,
 ) -> Result<usize> {
@@ -400,7 +411,7 @@ fn do_delete_chunks(
         return Ok(0);
     }
 
-    let mut params: Vec<&str> = vec![&bucket];
+    let mut params: Vec<&str> = vec![bucket];
     for chunk in chunks {
         params.push(chunk)
     }
@@ -419,7 +430,7 @@ fn do_delete_chunks(
         if has_content {
             internal_chunks.push(id);
         } else {
-            let path = chunk_path(&config.data_dir, &bucket, &chunk);
+            let path = chunk_path(&config.data_dir, bucket, &chunk);
             match std::fs::remove_file(path) {
                 Ok(_) => (),
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -453,6 +464,222 @@ fn do_delete_chunks(
     Ok(count)
 }
 
+/// Batch-upload multiple chunks in a single request.
+/// Body format (repeated until EOF):
+///   [64 ASCII hex hash]['\0'][4-byte LE u32 encrypted-data-len][encrypted-data]
+/// Storage follows the same SMALL_SIZE rule as individual PUT: small chunks go into
+/// the SQLite chunk_content table, large chunks are written to disk.
+/// Chunks that already exist are silently skipped.
+/// Response body: decimal count of newly inserted chunks.
+async fn handle_put_chunks(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
+        warn!("Unauthorized access for batch put chunks {bucket}");
+        return res;
+    }
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+
+    let mut v = Vec::new();
+    let mut body = req.into_body();
+    while let Some(frame) = body.frame().await {
+        let chunk = match frame?.into_data() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        v.extend_from_slice(&chunk);
+        if v.len() > 64 * 1024 * 1024 {
+            return handle_error!(StatusCode::BAD_REQUEST, "Too much data", "");
+        }
+    }
+
+    let count = tryfut!(
+        do_put_chunks(&mut state.conn.lock().unwrap(), &state.config, &bucket, &v),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_put_chunks failed"
+    );
+    state.stat.put_chunks_count.inc();
+    state.stat.put_chunk_bytes.add(v.len());
+    info!(
+        "{}:{}: put chunks {} inserted {} chunks",
+        file!(),
+        line!(),
+        bucket,
+        count
+    );
+    ok_message(Some(format!("{count}")))
+}
+
+fn do_put_chunks(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    bucket: &str,
+    data: &[u8],
+) -> Result<usize> {
+    // First pass: parse all records and validate, collecting what needs inserting.
+    struct ChunkRecord<'d> {
+        hash: String,
+        size: usize,
+        data: &'d [u8],
+    }
+    let mut records: Vec<ChunkRecord> = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let header = rest
+            .split_off(..64 + 1 + 4)
+            .ok_or_else(|| Error::Server("Truncated batch record"))?;
+        let hash_str =
+            std::str::from_utf8(&header[..64]).map_err(|_| Error::Server("Bad hash encoding"))?;
+        check_hash(hash_str)?;
+        if header[64] != b'\0' {
+            return Err(Error::Server("Missing record separator"));
+        }
+        let chunk_size = u32::from_le_bytes(header[65..69].try_into().unwrap()) as usize;
+        let data = rest
+            .split_off(..chunk_size)
+            .ok_or_else(|| Error::Server("Truncated chunk data"))?;
+        records.push(ChunkRecord {
+            hash: hash_str.to_string(),
+            size: chunk_size,
+            data,
+        });
+    }
+
+    // Second pass: insert.  Small chunks go into the DB in one transaction.
+    // Large chunks are written to disk then recorded individually (matching
+    // handle_put_chunk's write-then-rename approach).
+    let mut small: Vec<&ChunkRecord> = Vec::new();
+    let mut large: Vec<&ChunkRecord> = Vec::new();
+    {
+        let mut exists_stmt = conn.prepare("SELECT id FROM chunks WHERE bucket=? AND hash=?")?;
+        for rec in &records {
+            // Check existence once so we can skip both DB and disk work.
+            let exists = exists_stmt
+                .query(params![bucket, rec.hash])?
+                .next()?
+                .is_some();
+            if !exists {
+                if rec.size < SMALL_SIZE {
+                    small.push(rec);
+                } else {
+                    large.push(rec);
+                }
+            }
+        }
+        // `exists_stmt` dropped here, releasing the borrow on `conn`.
+    }
+
+    let mut count = 0;
+
+    // Batch-insert all small chunks in one transaction.
+    if !small.is_empty() {
+        let tx = conn.transaction()?;
+        for rec in &small {
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO chunks (bucket, hash, size, time, has_content) \
+                 VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
+                params![bucket, rec.hash, rec.size as i64],
+            )?;
+            if inserted > 0 {
+                let id = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT OR IGNORE INTO chunk_content (chunk_id, content) VALUES (?, ?)",
+                    params![id, rec.data],
+                )?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+    }
+
+    // Insert large chunks via temp-file + rename.
+    for rec in &large {
+        if store_chunk_on_disk(conn, config, bucket, &rec.hash, rec.data)? {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Check which chunks from a submitted list exist in the archive.
+/// Request body: null-delimited list of chunk hashes.
+/// Response body: null-delimited list of hashes that exist.
+async fn handle_has_chunks(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
+        warn!("Unauthorized access for has chunks {bucket}");
+        return res;
+    }
+
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+
+    let mut v = Vec::new();
+    let mut body = req.into_body();
+    while let Some(frame) = body.frame().await {
+        let chunk = match frame?.into_data() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        v.extend_from_slice(&chunk);
+        if v.len() >= 1024 * 1024 {
+            return handle_error!(StatusCode::BAD_REQUEST, "Too much data", "");
+        }
+    }
+
+    let s = tryfut!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad chunks");
+    if s.is_empty() {
+        return ok_message(Some(String::new()));
+    }
+    let chunks: Vec<&str> = s.split('\0').collect();
+    for chunk in chunks.iter() {
+        tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad chunk");
+    }
+
+    state.stat.has_chunks_count.inc();
+    let existing = tryfut!(
+        do_has_chunks(&mut state.conn.lock().unwrap(), &bucket, &chunks),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_has_chunks failed"
+    );
+    ok_message(Some(existing))
+}
+
+fn do_has_chunks(conn: &mut rusqlite::Connection, bucket: &str, chunks: &[&str]) -> Result<String> {
+    debug_assert!(!chunks.is_empty());
+    let mut params: Vec<&str> = vec![bucket];
+    for chunk in chunks {
+        params.push(chunk);
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT hash FROM chunks WHERE bucket=? AND hash IN (?{})",
+        ", ?".repeat(chunks.len() - 1)
+    ))?;
+
+    let mut ans = String::new();
+    for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))? {
+        let hash: String = row?;
+        if !ans.is_empty() {
+            ans.push('\0');
+        }
+        ans.push_str(&hash);
+    }
+    Ok(ans)
+}
+
 async fn handle_delete_chunk(
     bucket: String,
     chunk: String,
@@ -480,7 +707,7 @@ async fn handle_delete_chunk(
     let count = tryfut!(
         do_delete_chunks(
             &mut state.conn.lock().unwrap(),
-            bucket,
+            &bucket,
             std::slice::from_ref(&chu),
             &state.config
         ),
@@ -491,6 +718,7 @@ async fn handle_delete_chunk(
     if count != 1 {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
+    info!("{}:{}: delete chunk {} success", file!(), line!(), chunk);
     ok_message(None)
 }
 
@@ -533,7 +761,7 @@ async fn handle_delete_chunks(
     let count = tryfut!(
         do_delete_chunks(
             &mut state.conn.lock().unwrap(),
-            bucket,
+            &bucket,
             &chunks,
             &state.config
         ),
@@ -544,6 +772,13 @@ async fn handle_delete_chunks(
     if count != chunks.len() {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
+    info!(
+        "{}:{}: delete chunks {} deleted {} chunks",
+        file!(),
+        line!(),
+        bucket,
+        count
+    );
     ok_message(None)
 }
 
@@ -800,6 +1035,13 @@ async fn handle_put_root(
                 "Insert failed",
             );
     }
+    info!(
+        "{}:{}: put root {}/{} success",
+        file!(),
+        line!(),
+        bucket,
+        host
+    );
     ok_message(None)
 }
 
@@ -828,7 +1070,16 @@ async fn handle_delete_root(
     match res {
         Err(e) => handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Query failed", e),
         Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
-        Ok(_) => ok_message(None),
+        Ok(_) => {
+            info!(
+                "{}:{}: delete root {}/{} success",
+                file!(),
+                line!(),
+                bucket,
+                root
+            );
+            ok_message(None)
+        }
     }
 }
 
@@ -885,6 +1136,8 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
         (&s.delete_chunks_count, "delete_chunks_count_total"),
         (&s.chunks_deleted, "chunks_deleted_total"),
         (&s.delete_chunk_count, "delete_chunk_count_total"),
+        (&s.has_chunks_count, "has_chunks_count_total"),
+        (&s.put_chunks_count, "put_chunks_count_total"),
     ]
     .iter()
     {
@@ -975,6 +1228,10 @@ pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> Response
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false).await
     } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "chunks" {
         handle_put_chunk(path[2].clone(), path[3].clone(), req, state).await
+    } else if req.method() == Method::PUT && path.len() == 3 && path[1] == "chunks" {
+        handle_put_chunks(path[2].clone(), req, state).await
+    } else if req.method() == Method::POST && path.len() == 3 && path[1] == "chunks" {
+        handle_has_chunks(path[2].clone(), req, state).await
     } else if req.method() == Method::DELETE && path.len() == 3 && path[1] == "chunks" {
         handle_delete_chunks(path[2].clone(), req, state).await
     } else if req.method() == Method::DELETE && path.len() == 4 && path[1] == "chunks" {

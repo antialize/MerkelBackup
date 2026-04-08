@@ -43,6 +43,8 @@ pub struct Stat {
     pub delete_chunks_count: StatCounter,
     pub chunks_deleted: StatCounter,
     pub delete_chunk_count: StatCounter,
+    pub has_chunks_count: StatCounter,
+    pub put_chunks_count: StatCounter,
     pub start_time: std::time::SystemTime,
 }
 
