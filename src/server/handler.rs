@@ -233,23 +233,33 @@ async fn handle_put_chunk(
     // Small content is stored directly in the DB
     if len < SMALL_SIZE {
         state.stat.put_chunk_small.inc();
-        let conn = state.conn.lock().unwrap();
+        let mut conn = state.conn.lock().unwrap();
+        let tx = tryfut!(
+            conn.transaction(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Transaction failed",
+        );
         tryfut!(
-            conn.execute(
+            tx.execute(
                 "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
                 params![&bucket, &chunk, v.len() as i64],
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Insert failed",
         );
-        let id = conn.last_insert_rowid();
+        let id = tx.last_insert_rowid();
         tryfut!(
-            conn.execute(
+            tx.execute(
                 "INSERT INTO chunk_content (chunk_id, content) VALUES (?, ?)",
                 params![id, &v],
             ),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Insert failed",
+        );
+        tryfut!(
+            tx.commit(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Commit failed",
         );
     } else {
         state.stat.put_chunk_large.inc();
