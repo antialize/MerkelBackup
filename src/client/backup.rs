@@ -42,6 +42,9 @@ const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 const BATCH_UPLOAD_MAX_ENCRYPTED: usize = 64 * 1024 + 12;
 // Flush the pending batch whenever this many bytes have accumulated.
 const BATCH_FLUSH_BYTES: usize = 4 * 1024 * 1024;
+// Flush pending_verify during scan whenever this many unconfirmed chunks accumulate,
+// so progress is saved durably even if the job is killed mid-scan.
+const PENDING_VERIFY_FLUSH_THRESHOLD: usize = 50_000;
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirEnt {
@@ -65,6 +68,7 @@ struct State<'a> {
     progress: Option<ProgressBar<std::io::Stdout>>,
     has_remote_stmt: Statement<'a>,
     update_remote_stmt: Statement<'a>,
+    insert_absent_stmt: Statement<'a>,
     get_chunks_stmt: Statement<'a>,
     get_chunks_unsized_stmt: Statement<'a>,
     update_chunks_stmt: Statement<'a>,
@@ -91,16 +95,17 @@ enum HasChunkResult {
 }
 
 fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasChunkResult, Error> {
-    let cnt: i64 = state
-        .has_remote_stmt
-        .query(params![chunk])?
-        .next()?
-        .ok_or(Error::MissingRow())?
-        .get(0)?;
-    if cnt == 1 {
-        return Ok(HasChunkResult::YesCached);
+    let mut rows = state.has_remote_stmt.query(params![chunk])?;
+    if let Some(row) = rows.next()? {
+        let present: i64 = row.get(0)?;
+        if present == 1 {
+            return Ok(HasChunkResult::YesCached);
+        }
+        // present == 0 means confirmed absent on the server, so skip the HEAD request and upload directly
+        return Ok(HasChunkResult::No);
     }
 
+    // Not in local cache at all, so the server state is unknown
     // For small chunks it is quicker to just reupload
     if let Some(size) = size
         && size < 1024 * 16
@@ -246,35 +251,48 @@ impl<'a> BackupContext for State<'a> {
 
     fn has_chunks(&mut self, chunks: RStr) -> PResult<bool> {
         let chunk_list: Vec<&str> = chunks.split(",").collect();
-        let mut uncached: Vec<&str> = Vec::new();
+        let mut unknown: Vec<&str> = Vec::new();
         for &chunk in &chunk_list {
             let mut rows = match self.has_remote_stmt.query(params![chunk]) {
                 Ok(r) => r,
                 Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
             };
-            let cnt: i64 = match rows.next() {
+            match rows.next() {
                 Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
-                Ok(None) => return RErr(RBoxError::new(Error::MissingRow())),
-                Ok(Some(row)) => match row.get(0) {
-                    Ok(v) => v,
-                    Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
-                },
-            };
-            if cnt == 0 {
-                uncached.push(chunk);
+                Ok(None) => {
+                    // Not in local cache, so existence on the server is unknown
+                    unknown.push(chunk);
+                }
+                Ok(Some(row)) => {
+                    let present: i64 = match row.get(0) {
+                        Ok(v) => v,
+                        Err(e) => return RErr(RBoxError::new(Error::Sql(e))),
+                    };
+                    if present == 0 {
+                        // Confirmed absent, so no network check is needed
+                        return ROk(false);
+                    }
+                    // present == 1: confirmed on server, continue
+                }
             }
         }
-        if uncached.is_empty() {
+        if unknown.is_empty() {
             return ROk(true);
         }
         if self.scan {
-            for c in &uncached {
+            for c in &unknown {
                 self.pending_verify.insert(c.to_string());
+            }
+            if self.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
+                match flush_pending_verify(self) {
+                    Ok(()) => {}
+                    Err(e) => return RErr(RBoxError::new(e)),
+                }
             }
             return ROk(true); // optimistic during scan; verified in batch after scan completes
         }
-        match has_chunks_remote(&uncached, self) {
-            Ok(r) => ROk(r.iter().count() == uncached.len()),
+        match has_chunks_remote(&unknown, self) {
+            Ok(r) => ROk(r.iter().count() == unknown.len()),
             Err(e) => RErr(RBoxError::new(e)),
         }
     }
@@ -479,30 +497,38 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         };
         if let Some(chunks) = chunks {
             let chunk_list: Vec<&str> = chunks.split(',').collect();
-            let mut uncached = Vec::new();
+            let mut unknown = Vec::new();
+            let mut has_absent = false;
             for chunk in &chunk_list {
-                let cnt: i64 = state
-                    .has_remote_stmt
-                    .query(params![chunk])?
-                    .next()?
-                    .ok_or(Error::MissingRow())?
-                    .get(0)?;
-                if cnt == 0 {
-                    uncached.push(*chunk);
+                let mut rows = state.has_remote_stmt.query(params![chunk])?;
+                match rows.next()? {
+                    None => unknown.push(*chunk),
+                    Some(row) => {
+                        let present: i64 = row.get(0)?;
+                        if present == 0 {
+                            has_absent = true;
+                            break; // confirmed absent, no need to check remaining chunks
+                        }
+                    }
                 }
             }
-            let good = uncached.is_empty() || {
-                if state.scan {
-                    for c in &uncached {
-                        state.pending_verify.insert(c.to_string());
+            if !has_absent {
+                let good = unknown.is_empty() || {
+                    if state.scan {
+                        for c in &unknown {
+                            state.pending_verify.insert(c.to_string());
+                        }
+                        if state.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
+                            flush_pending_verify(state)?;
+                        }
+                        true // optimistic during scan; verified in batch after scan completes
+                    } else {
+                        has_chunks_remote(&unknown, state)?.iter().count() == unknown.len()
                     }
-                    true // optimistic during scan; verified in batch after scan completes
-                } else {
-                    has_chunks_remote(&uncached, state).iter().count() == uncached.len()
+                };
+                if good {
+                    return Ok(chunks);
                 }
-            };
-            if good {
-                return Ok(chunks);
             }
         }
     }
@@ -724,8 +750,14 @@ fn flush_pending_verify(state: &mut State) -> Result<(), Error> {
     for batch in chunks.chunks(BATCH_SIZE) {
         let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
         let found = has_chunks_remote(&refs, state)?;
+        let found_set: std::collections::HashSet<&str> = found.iter().collect();
         for hash in found.iter() {
             state.update_remote_stmt.execute(params![hash])?;
+        }
+        for &hash in &refs {
+            if !found_set.contains(hash) {
+                state.insert_absent_stmt.execute(params![hash])?;
+            }
         }
     }
     Ok(())
@@ -752,10 +784,23 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     conn.execute(
         "CREATE TABLE IF NOT EXISTS remote (
             chunk TEXT NOT NULL UNIQUE,
-            time INTEGER NOT NULL
+            time INTEGER NOT NULL,
+            present INTEGER NOT NULL DEFAULT 1
         )",
         [],
     )?;
+    // Migrate existing databases that predate the 'present' column.
+    // Ignore only the expected "duplicate column name" error on
+    // already-migrated databases, and propagate every other failure.
+    match conn.execute(
+        "ALTER TABLE remote ADD COLUMN present INTEGER NOT NULL DEFAULT 1",
+        [],
+    ) {
+        Ok(_) => (),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+            if message.contains("duplicate column name") => {}
+        Err(e) => return Err(Error::Sql(e)),
+    }
     conn.execute(
         "CREATE TABLE IF NOT EXISTS remote_server (
             server TEXT NOT NULL
@@ -799,9 +844,13 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         scan: true,
         transfer_bytes: 0,
         progress: None,
-        has_remote_stmt: conn.prepare("SELECT count(*) FROM remote WHERE chunk = ?")?,
-        update_remote_stmt: conn
-            .prepare("REPLACE INTO remote VALUES (?, strftime('%s', 'now'))")?,
+        has_remote_stmt: conn.prepare("SELECT present FROM remote WHERE chunk = ?")?,
+        update_remote_stmt: conn.prepare(
+            "REPLACE INTO remote (chunk, time, present) VALUES (?, strftime('%s', 'now'), 1)",
+        )?,
+        insert_absent_stmt: conn.prepare(
+            "REPLACE INTO remote (chunk, time, present) VALUES (?, strftime('%s', 'now'), 0)",
+        )?,
         get_chunks_stmt: conn
             .prepare("SELECT chunks FROM files WHERE path = ? AND size = ? AND mtime = ?")?,
         get_chunks_unsized_stmt: conn
