@@ -1,7 +1,8 @@
 use rusqlite::Connection;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
+use crate::read_pool::ReadConnectionPool;
 
 #[derive(Default)]
 pub struct StatCounter {
@@ -51,7 +52,11 @@ pub struct Stat {
 /// The state passed around the variaus methods
 pub struct State {
     pub config: Config,
+    /// Write connection. Holds the exclusive writer lock and is used for all mutating handlers.
     pub conn: Mutex<Connection>,
+    /// Read-only connection. WAL mode allows this to run concurrently with the writer.
+    /// Used by read-only handlers (has_chunks, get_chunk, get_status, get_roots, list_chunks).
+    pub read_pool: Arc<ReadConnectionPool>,
     pub stat: Stat,
 }
 
