@@ -205,8 +205,16 @@ async fn handle_put_chunk(
     );
 
     // Check if the chunk is already there.
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
+    let chunk2 = chunk.clone();
     if tryfut!(
-        do_check_chunk_exists(&mut state.conn.lock().unwrap(), &bucket, &chunk),
+        tokio::task::spawn_blocking(move || {
+            do_check_chunk_exists(&mut state2.conn.lock().unwrap(), &bucket2, &chunk2)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_check_chunk_exists failed"
     ) {
@@ -233,44 +241,49 @@ async fn handle_put_chunk(
     // Small content is stored directly in the DB
     if len < SMALL_SIZE {
         state.stat.put_chunk_small.inc();
-        let mut conn = state.conn.lock().unwrap();
-        let tx = tryfut!(
-            conn.transaction(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Transaction failed",
-        );
+        let state2 = Arc::clone(&state);
+        let bucket2 = bucket.clone();
+        let chunk2 = chunk.clone();
         tryfut!(
-            tx.execute(
-                "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
-                params![&bucket, &chunk, v.len() as i64],
-            ),
+            tokio::task::spawn_blocking(move || -> crate::error::Result<()> {
+                let mut conn = state2.conn.lock().unwrap();
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
+                    params![&bucket2, &chunk2, v.len() as i64],
+                )?;
+                let id = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO chunk_content (chunk_id, content) VALUES (?, ?)",
+                    params![id, &v],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+            .and_then(|r| r),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Insert failed",
-        );
-        let id = tx.last_insert_rowid();
-        tryfut!(
-            tx.execute(
-                "INSERT INTO chunk_content (chunk_id, content) VALUES (?, ?)",
-                params![id, &v],
-            ),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Insert failed",
-        );
-        tryfut!(
-            tx.commit(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Commit failed",
         );
     } else {
         state.stat.put_chunk_large.inc();
+        let state2 = Arc::clone(&state);
+        let bucket2 = bucket.clone();
+        let chunk2 = chunk.clone();
         tryfut!(
-            store_chunk_on_disk(
-                &mut state.conn.lock().unwrap(),
-                &state.config,
-                &bucket,
-                &chunk,
-                &v,
-            ),
+            tokio::task::spawn_blocking(move || {
+                store_chunk_on_disk(
+                    &mut state2.conn.lock().unwrap(),
+                    &state2.config,
+                    &bucket2,
+                    &chunk2,
+                    &v,
+                )
+            })
+            .await
+            .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+            .and_then(|r| r),
             StatusCode::INTERNAL_SERVER_ERROR,
             "Store chunk on disk failed"
         );
@@ -323,8 +336,16 @@ async fn handle_get_chunk(
     );
 
     let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
+    let chunk2 = chunk.clone();
     let (content, size) = match tryfut!(
-        do_get_chunk(&mut pool.acquire(), &bucket, &chunk, head),
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_get_chunk(&mut conn, &bucket2, &chunk2, head)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error"
     ) {
@@ -510,13 +531,26 @@ async fn handle_put_chunks(
         }
     }
 
+    let v_len = v.len();
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
     let (already_there, small_inserted, large_inserted) = tryfut!(
-        do_put_chunks(&mut state.conn.lock().unwrap(), &state.config, &bucket, &v),
+        tokio::task::spawn_blocking(move || {
+            do_put_chunks(
+                &mut state2.conn.lock().unwrap(),
+                &state2.config,
+                &bucket2,
+                &v,
+            )
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_put_chunks failed"
     );
     state.stat.put_chunks_count.inc();
-    state.stat.put_chunk_bytes.add(v.len());
+    state.stat.put_chunk_bytes.add(v_len);
     state.stat.put_chunk_already_there.add(already_there);
     state.stat.put_chunk_small.add(small_inserted);
     state.stat.put_chunk_large.add(large_inserted);
@@ -664,14 +698,22 @@ async fn handle_has_chunks(
     if s.is_empty() {
         return ok_message(Some(String::new()));
     }
-    let chunks: Vec<&str> = s.split('\0').collect();
-    for chunk in chunks.iter() {
+    for chunk in s.split('\0') {
         tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad chunk");
     }
 
     state.stat.has_chunks_count.inc();
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
     let existing = tryfut!(
-        do_has_chunks(&mut state.read_pool.acquire(), &bucket, &chunks),
+        tokio::task::spawn_blocking(move || {
+            let chunks: Vec<&str> = s.split('\0').collect();
+            let mut conn = pool.acquire();
+            do_has_chunks(&mut conn, &bucket2, &chunks)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_has_chunks failed"
     );
@@ -722,15 +764,22 @@ async fn handle_delete_chunk(
         StatusCode::BAD_REQUEST,
         "Bad chunk"
     );
-    let chu: &str = &chunk;
-
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
+    let chunk2 = chunk.clone();
     let count = tryfut!(
-        do_delete_chunks(
-            &mut state.conn.lock().unwrap(),
-            &bucket,
-            std::slice::from_ref(&chu),
-            &state.config
-        ),
+        tokio::task::spawn_blocking(move || {
+            let hash = chunk2.as_str().to_string();
+            do_delete_chunks(
+                &mut state2.conn.lock().unwrap(),
+                &bucket2,
+                &[hash.as_str()],
+                &state2.config,
+            )
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_delete_chunks failed"
     );
@@ -774,22 +823,33 @@ async fn handle_delete_chunks(
     }
 
     let s = tryfut!(String::from_utf8(v), StatusCode::BAD_REQUEST, "Bad chunks");
-    let chunks: Vec<&str> = s.split('\0').collect();
-    for chunk in chunks.iter() {
-        tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad bucket");
-    }
+    let chunk_count = {
+        let chunks: Vec<&str> = s.split('\0').collect();
+        for chunk in chunks.iter() {
+            tryfut!(check_hash(chunk), StatusCode::BAD_REQUEST, "Bad chunk");
+        }
+        chunks.len()
+    };
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
     let count = tryfut!(
-        do_delete_chunks(
-            &mut state.conn.lock().unwrap(),
-            &bucket,
-            &chunks,
-            &state.config
-        ),
+        tokio::task::spawn_blocking(move || {
+            let chunks: Vec<&str> = s.split('\0').collect();
+            do_delete_chunks(
+                &mut state2.conn.lock().unwrap(),
+                &bucket2,
+                &chunks,
+                &state2.config,
+            )
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_delete_chunks failed"
     );
     state.stat.chunks_deleted.add(count);
-    if count != chunks.len() {
+    if count != chunk_count {
         return handle_error!(StatusCode::NOT_FOUND, "Missing chunk", "");
     }
     info!(
@@ -837,13 +897,17 @@ async fn handle_list_chunks(
 
     state.stat.list_chunks_count.inc();
 
+    let state2 = Arc::clone(&state);
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
     let ans = tryfut!(
-        do_list_chunks(
-            &mut state.read_pool.acquire(),
-            &state.config,
-            &bucket,
-            validate
-        ),
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_list_chunks(&mut conn, &state2.config, &bucket2, validate)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_list_chunks failed"
     );
@@ -918,8 +982,16 @@ async fn handle_get_status(
 
     state.stat.get_status_count.inc();
 
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
     let time = tryfut!(
-        do_get_status(&mut state.read_pool.acquire(), &bucket),
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_get_status(&mut conn, &bucket2)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error",
     );
@@ -961,11 +1033,20 @@ async fn handle_get_roots(
 
     state.stat.get_roots_count.inc();
     // LIMIT response to only new roots
-    ok_message(Some(tryfut!(
-        do_get_roots(&mut state.read_pool.acquire(), &bucket, earliest_root),
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
+    let roots = tryfut!(
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_get_roots(&mut conn, &bucket2, earliest_root)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_get_roots failed"
-    )))
+    );
+    ok_message(Some(roots))
 }
 
 fn do_get_roots(
@@ -1044,17 +1125,23 @@ async fn handle_put_root(
         "Bad bucket"
     );
 
-    {
-        let conn = state.conn.lock().unwrap();
-        tryfut!(
-                conn.execute(
-                    "INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
-                    params![&bucket, &host, &s],
-                ),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Insert failed",
-            );
-    }
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
+    let host2 = host.clone();
+    tryfut!(
+        tokio::task::spawn_blocking(move || -> crate::error::Result<()> {
+            state2.conn.lock().unwrap().execute(
+                "INSERT INTO roots (bucket, host, time, hash) VALUES (?, ?, strftime('%s', 'now'), ?)",
+                params![&bucket2, &host2, &s],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Insert failed",
+    );
     info!(
         "{}:{}: put root {}/{} success",
         file!(),
@@ -1083,14 +1170,25 @@ async fn handle_delete_root(
 
     state.stat.delete_root_count.inc();
 
-    let res = state.conn.lock().unwrap().execute(
-        "DELETE FROM roots WHERE bucket=? AND id=?",
-        params![bucket, root],
+    let state2 = Arc::clone(&state);
+    let bucket2 = bucket.clone();
+    let root2 = root.clone();
+    let rows = tryfut!(
+        tokio::task::spawn_blocking(move || -> crate::error::Result<usize> {
+            Ok(state2.conn.lock().unwrap().execute(
+                "DELETE FROM roots WHERE bucket=? AND id=?",
+                params![bucket2, root2],
+            )?)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Query failed"
     );
-    match res {
-        Err(e) => handle_error!(StatusCode::INTERNAL_SERVER_ERROR, "Query failed", e),
-        Ok(0) => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
-        Ok(_) => {
+    match rows {
+        0 => handle_error!(StatusCode::NOT_FOUND, "Not found", ""),
+        _ => {
             info!(
                 "{}:{}: delete root {}/{} success",
                 file!(),
@@ -1176,32 +1274,23 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
     // Note that SELECT COUNT(...) always does a full table scan in SQLite3
     // so we use the max id instead, which is faster. See also:
     // https://stackoverflow.com/q/8988915/sqlite-count-slow-on-big-tables
-    let roots_max_id: i64 = tryfut!(
-        state.read_pool.acquire().query_row(
-            "SELECT MAX(`id`) FROM roots LIMIT 1",
-            [],
-            |row| row.get(0),
-        ),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Select failed"
-    );
-    let chunks_max_id: i64 = tryfut!(
-        state.read_pool.acquire().query_row(
-            "SELECT MAX(`id`) FROM chunks LIMIT 1",
-            [],
-            |row| row.get(0),
-        ),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Select failed"
-    );
-    // `deletes` has no id column, but it's a tiny table,
-    // so use a full table scan with COUNT(*).
-    let deletes_count: i64 = tryfut!(
-        state.read_pool.acquire().query_row(
-            "SELECT COUNT(*) FROM deletes LIMIT 1",
-            [],
-            |row| row.get(0),
-        ),
+    let pool = Arc::clone(&state.read_pool);
+    let (roots_max_id, chunks_max_id, deletes_count): (i64, i64, i64) = tryfut!(
+        tokio::task::spawn_blocking(move || -> crate::error::Result<(i64, i64, i64)> {
+            let conn = pool.acquire();
+            let roots_max_id: i64 =
+                conn.query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| row.get(0))?;
+            let chunks_max_id: i64 =
+                conn.query_row("SELECT MAX(`id`) FROM chunks LIMIT 1", [], |row| row.get(0))?;
+            // `deletes` has no id column, but it's a tiny table,
+            // so use a full table scan with COUNT(*).
+            let deletes_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM deletes LIMIT 1", [], |row| row.get(0))?;
+            Ok((roots_max_id, chunks_max_id, deletes_count))
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
