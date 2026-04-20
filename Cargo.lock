@@ -1117,6 +1117,7 @@ dependencies = [
  "chrono",
  "cipher",
  "clap",
+ "crossbeam-channel",
  "digest 0.11.2",
  "hex",
  "http-body-util",
