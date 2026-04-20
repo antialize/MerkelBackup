@@ -322,8 +322,9 @@ async fn handle_get_chunk(
         "Bad chunk"
     );
 
+    let pool = Arc::clone(&state.read_pool);
     let (content, size) = match tryfut!(
-        do_get_chunk(&mut state.conn.lock().unwrap(), &bucket, &chunk, head),
+        do_get_chunk(&mut pool.acquire(), &bucket, &chunk, head),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error"
     ) {
@@ -670,7 +671,7 @@ async fn handle_has_chunks(
 
     state.stat.has_chunks_count.inc();
     let existing = tryfut!(
-        do_has_chunks(&mut state.conn.lock().unwrap(), &bucket, &chunks),
+        do_has_chunks(&mut state.read_pool.acquire(), &bucket, &chunks),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_has_chunks failed"
     );
@@ -838,7 +839,7 @@ async fn handle_list_chunks(
 
     let ans = tryfut!(
         do_list_chunks(
-            &mut state.conn.lock().unwrap(),
+            &mut state.read_pool.acquire(),
             &state.config,
             &bucket,
             validate
@@ -918,7 +919,7 @@ async fn handle_get_status(
     state.stat.get_status_count.inc();
 
     let time = tryfut!(
-        do_get_status(&mut state.conn.lock().unwrap(), &bucket),
+        do_get_status(&mut state.read_pool.acquire(), &bucket),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Database error",
     );
@@ -961,7 +962,7 @@ async fn handle_get_roots(
     state.stat.get_roots_count.inc();
     // LIMIT response to only new roots
     ok_message(Some(tryfut!(
-        do_get_roots(&mut state.conn.lock().unwrap(), &bucket, earliest_root),
+        do_get_roots(&mut state.read_pool.acquire(), &bucket, earliest_root),
         StatusCode::INTERNAL_SERVER_ERROR,
         "do_get_roots failed"
     )))
@@ -1176,31 +1177,31 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
     // so we use the max id instead, which is faster. See also:
     // https://stackoverflow.com/q/8988915/sqlite-count-slow-on-big-tables
     let roots_max_id: i64 = tryfut!(
-        state
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| row.get(0),),
+        state.read_pool.acquire().query_row(
+            "SELECT MAX(`id`) FROM roots LIMIT 1",
+            [],
+            |row| row.get(0),
+        ),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
     let chunks_max_id: i64 = tryfut!(
-        state
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT MAX(`id`) FROM chunks LIMIT 1", [], |row| row.get(0),),
+        state.read_pool.acquire().query_row(
+            "SELECT MAX(`id`) FROM chunks LIMIT 1",
+            [],
+            |row| row.get(0),
+        ),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );
     // `deletes` has no id column, but it's a tiny table,
     // so use a full table scan with COUNT(*).
     let deletes_count: i64 = tryfut!(
-        state
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM deletes LIMIT 1", [], |row| row.get(0),),
+        state.read_pool.acquire().query_row(
+            "SELECT COUNT(*) FROM deletes LIMIT 1",
+            [],
+            |row| row.get(0),
+        ),
         StatusCode::INTERNAL_SERVER_ERROR,
         "Select failed"
     );

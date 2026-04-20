@@ -17,6 +17,7 @@ mod config;
 mod error;
 use config::parse_config;
 mod handler;
+mod read_pool;
 use handler::backup_serve;
 mod state;
 use hyper::service::service_fn;
@@ -59,9 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("mbackupd version {}", env!("CARGO_PKG_VERSION"));
     debug!("Config {config:?}");
     let conn = Mutex::new(setup_db(&config));
+    let read_pool = read_pool::ReadConnectionPool::new(&config, 16);
     let state = Arc::new(State {
         config,
         conn,
+        read_pool,
         stat: Stat {
             put_chunk_already_there: Default::default(),
             put_chunk_small: Default::default(),
