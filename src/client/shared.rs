@@ -166,18 +166,28 @@ pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error
 where
     F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
 {
-    for sleep in [5, 20, 60, 120, 240, 280].iter() {
+    // Only escalate to warn after this many failed attempts; earlier failures
+    // are logged at debug so transient errors don't pollute cron output.
+    const WARN_AFTER_ATTEMPTS: usize = 2;
+    for (attempt, sleep) in [5u64, 20, 60, 120, 240, 280].iter().enumerate() {
+        let log_retry = |msg: &str, status: &dyn std::fmt::Display| {
+            if attempt >= WARN_AFTER_ATTEMPTS {
+                warn!("{msg} {status}");
+            } else {
+                debug!("{msg} {status}");
+            }
+        };
         let sleep = match f() {
             Ok(res) => match res.status() {
                 reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::GATEWAY_TIMEOUT => {
-                    warn!("Request timeout, retrying {}", res.status());
+                    log_retry("Request timeout, retrying", &res.status());
                     u64::max(*sleep, 2 * 60)
                 }
                 reqwest::StatusCode::TOO_MANY_REQUESTS
                 | reqwest::StatusCode::INTERNAL_SERVER_ERROR
                 | reqwest::StatusCode::BAD_GATEWAY
                 | reqwest::StatusCode::SERVICE_UNAVAILABLE => {
-                    warn!("Request failed, retrying {}", res.status());
+                    log_retry("Request failed, retrying", &res.status());
                     *sleep
                 }
                 _ => return Ok(res),
@@ -185,8 +195,10 @@ where
             Err(e) => {
                 if e.is_timeout() {
                     debug!("Request failed, retrying {e:?}")
-                } else {
+                } else if attempt >= WARN_AFTER_ATTEMPTS {
                     warn!("Request failed, retrying {e:?}")
+                } else {
+                    debug!("Request failed, retrying {e:?}")
                 }
                 *sleep
             }
