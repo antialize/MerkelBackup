@@ -11,7 +11,10 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 extern crate chrono;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 
 mod config;
 mod error;
@@ -62,11 +65,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("mbackupd version {}", env!("CARGO_PKG_VERSION"));
     debug!("Config {config:?}");
     let conn = Mutex::new(setup_db(&config));
+
+    let buckets = {
+        let conn = conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, bucket FROM buckets")?;
+        let mut buckets = HashMap::new();
+        for row in stmt.query_map((), |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (id, bucket): (i64, String) = row?;
+            buckets.insert(bucket, id);
+        }
+        RwLock::new(buckets)
+    };
+
     let read_pool = read_pool::ReadConnectionPool::new(&config, 16);
     let state = Arc::new(State {
         config,
         conn,
         read_pool,
+        buckets,
         stat: Stat {
             put_chunk_already_there: Default::default(),
             put_chunk_small: Default::default(),

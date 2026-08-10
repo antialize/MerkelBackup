@@ -164,6 +164,7 @@ fn store_chunk_on_disk(
     conn: &mut rusqlite::Connection,
     config: &Config,
     bucket: &str,
+    bucket_id: i64,
     hash: &str,
     data: &[u8],
 ) -> Result<bool> {
@@ -187,7 +188,7 @@ fn store_chunk_on_disk(
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO chunks (bucket, hash, size, time, has_content) \
          VALUES (?, ?, ?, strftime('%s', 'now'), FALSE)",
-        params![bucket, hash, data.len() as i64],
+        params![bucket_id, hash, data.len() as i64],
     )?;
     if inserted > 0 {
         if std::fs::rename(&temp_path, chunk_path(&config.data_dir, bucket, hash)).is_err() {
@@ -224,12 +225,12 @@ async fn handle_put_chunk(
     );
 
     // Check if the chunk is already there.
+    let bucket_id = ensure_bucket(&state, &bucket)?;
     let state2 = Arc::clone(&state);
-    let bucket2 = bucket.clone();
     let chunk2 = chunk.clone();
     if tryfut!(
         tokio::task::spawn_blocking(move || {
-            do_check_chunk_exists(&mut state2.conn.lock().unwrap(), &bucket2, &chunk2)
+            do_check_chunk_exists(&mut state2.conn.lock().unwrap(), bucket_id, &chunk2)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -261,7 +262,6 @@ async fn handle_put_chunk(
     if len < SMALL_SIZE {
         state.stat.put_chunk_small.inc();
         let state2 = Arc::clone(&state);
-        let bucket2 = bucket.clone();
         let chunk2 = chunk.clone();
         tryfut!(
             tokio::task::spawn_blocking(move || -> crate::error::Result<()> {
@@ -269,7 +269,7 @@ async fn handle_put_chunk(
                 let tx = conn.transaction()?;
                 tx.execute(
                     "INSERT INTO chunks (bucket, hash, size, time, has_content) VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
-                    params![&bucket2, &chunk2, v.len() as i64],
+                    params![bucket_id, &chunk2, v.len() as i64],
                 )?;
                 let id = tx.last_insert_rowid();
                 tx.execute(
@@ -296,6 +296,7 @@ async fn handle_put_chunk(
                     &mut state2.conn.lock().unwrap(),
                     &state2.config,
                     &bucket2,
+                    bucket_id,
                     &chunk2,
                     &v,
                 )
@@ -314,11 +315,11 @@ async fn handle_put_chunk(
 
 fn do_check_chunk_exists(
     conn: &mut rusqlite::Connection,
-    bucket: &str,
+    bucket_id: i64,
     chunk: &str,
 ) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT id FROM chunks WHERE bucket=? AND hash=?")?;
-    let mut rows = stmt.query(params![bucket, chunk])?;
+    let mut rows = stmt.query(params![bucket_id, chunk])?;
     Ok(rows.next()?.is_some())
 }
 
@@ -354,13 +355,24 @@ async fn handle_get_chunk(
         "Bad chunk"
     );
 
+    // An unknown bucket has never had a chunk written, so the chunk cannot exist.
+    let bucket_id = match lookup_bucket(&state, &bucket) {
+        Some(id) => id,
+        None => {
+            if head {
+                state.stat.get_chunk_head_missing.inc();
+            } else {
+                state.stat.get_chunk_missing.inc();
+            }
+            return handle_error!(StatusCode::NOT_FOUND, "Not found", chunk);
+        }
+    };
     let pool = Arc::clone(&state.read_pool);
-    let bucket2 = bucket.clone();
     let chunk2 = chunk.clone();
     let (content, size) = match tryfut!(
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.acquire();
-            do_get_chunk(&mut conn, &bucket2, &chunk2, head)
+            do_get_chunk(&mut conn, bucket_id, &chunk2, head)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -416,14 +428,14 @@ async fn handle_get_chunk(
 
 fn do_get_chunk(
     conn: &mut rusqlite::Connection,
-    bucket: &str,
+    bucket_id: i64,
     chunk: &str,
     head: bool,
 ) -> Result<Option<(Option<Vec<u8>>, i64)>> {
     let mut stmt =
         conn.prepare("SELECT id, has_content, size FROM chunks WHERE bucket=? AND hash=?")?;
 
-    let mut rows = stmt.query(params![bucket, chunk])?;
+    let mut rows = stmt.query(params![bucket_id, chunk])?;
     let (_id, content, size) = match rows.next()? {
         Some(row) => {
             let id: i64 = row.get(0)?;
@@ -452,22 +464,38 @@ fn do_get_chunk(
     Ok(Some((content, size)))
 }
 
+/// Look up the small integer id for a bucket, or `None` if it has never been written.
+fn lookup_bucket(state: &State, bucket: &str) -> Option<i64> {
+    let buckets = state.buckets.read().unwrap();
+    buckets.get(bucket).copied()
+}
+
 /// Look up the small integer id for a bucket, creating it if needed.
-fn bucket_id(tx: &rusqlite::Transaction, bucket: &str) -> Result<i64> {
-    tx.execute(
-        "INSERT OR IGNORE INTO buckets (bucket) VALUES (?)",
-        params![bucket],
-    )?;
-    Ok(tx.query_row(
-        "SELECT id FROM buckets WHERE bucket = ?",
-        params![bucket],
-        |row| row.get(0),
-    )?)
+fn ensure_bucket(state: &State, bucket: &str) -> Result<i64> {
+    if let Some(id) = lookup_bucket(state, bucket) {
+        return Ok(id);
+    }
+    let id = {
+        let conn = state.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO buckets (bucket) VALUES (?)",
+            params![bucket],
+        )?;
+        conn.query_row(
+            "SELECT id FROM buckets WHERE bucket = ?",
+            params![bucket],
+            |row| row.get(0),
+        )?
+    };
+    let mut buckets = state.buckets.write().unwrap();
+    buckets.insert(bucket.to_string(), id);
+    Ok(id)
 }
 
 fn do_delete_chunks(
     conn: &mut rusqlite::Connection,
     bucket: &str,
+    bucket_id: i64,
     chunks: &[&str],
     config: &Config,
 ) -> Result<usize> {
@@ -475,13 +503,14 @@ fn do_delete_chunks(
         return Ok(0);
     }
 
-    let mut params: Vec<&str> = vec![bucket];
-    for chunk in chunks {
-        params.push(chunk)
-    }
-
     let tx = conn.transaction()?;
-    let bid = bucket_id(&tx, bucket)?;
+
+    // bucket=? binds the integer id; the remaining placeholders bind the chunk hashes.
+    let mut qp: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunks.len() + 1);
+    qp.push(&bucket_id);
+    for chunk in chunks {
+        qp.push(chunk);
+    }
 
     let mut internal_chunks = Vec::new();
     let mut external_paths = Vec::new();
@@ -492,7 +521,7 @@ fn do_delete_chunks(
             ", ?".repeat(chunks.len() - 1)
         ))?;
 
-        for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        for row in stmt.query_map(qp.as_slice(), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })? {
             // TODO(rav): Make has_content NOT NULL in the database
@@ -524,13 +553,13 @@ fn do_delete_chunks(
             "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
             ", ?".repeat(chunks.len() - 1)
         ),
-        rusqlite::params_from_iter(params.iter()),
+        qp.as_slice(),
     )?;
 
     {
         let mut stmt = tx.prepare("INSERT INTO deleted (bucket, prefix) VALUES (?, ?)")?;
         for prefix in &prefixes {
-            stmt.execute(params![bid, prefix])?;
+            stmt.execute(params![bucket_id, prefix])?;
         }
     }
 
@@ -592,6 +621,7 @@ async fn handle_put_chunks(
 
     let v_len = v.len();
     let state2 = Arc::clone(&state);
+    let bucket_id = ensure_bucket(&state, &bucket)?;
     let bucket2 = bucket.clone();
     let (already_there, small_inserted, large_inserted) = tryfut!(
         tokio::task::spawn_blocking(move || {
@@ -599,6 +629,7 @@ async fn handle_put_chunks(
                 &mut state2.conn.lock().unwrap(),
                 &state2.config,
                 &bucket2,
+                bucket_id,
                 &v,
             )
         })
@@ -631,6 +662,7 @@ fn do_put_chunks(
     conn: &mut rusqlite::Connection,
     config: &Config,
     bucket: &str,
+    bucket_id: i64,
     data: &[u8],
 ) -> Result<(usize, usize, usize)> {
     // First pass: parse all records and validate, collecting what needs inserting.
@@ -672,7 +704,7 @@ fn do_put_chunks(
         for rec in &records {
             // Check existence once so we can skip both DB and disk work.
             let exists = exists_stmt
-                .query(params![bucket, rec.hash])?
+                .query(params![bucket_id, rec.hash])?
                 .next()?
                 .is_some();
             if !exists {
@@ -696,7 +728,7 @@ fn do_put_chunks(
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO chunks (bucket, hash, size, time, has_content) \
                  VALUES (?, ?, ?, strftime('%s', 'now'), TRUE)",
-                params![bucket, rec.hash, rec.size as i64],
+                params![bucket_id, rec.hash, rec.size as i64],
             )?;
             if inserted > 0 {
                 let id = tx.last_insert_rowid();
@@ -712,7 +744,7 @@ fn do_put_chunks(
 
     // Insert large chunks via temp-file + rename.
     for rec in &large {
-        if store_chunk_on_disk(conn, config, bucket, &rec.hash, rec.data)? {
+        if store_chunk_on_disk(conn, config, bucket, bucket_id, &rec.hash, rec.data)? {
             large_inserted += 1;
         }
     }
@@ -762,13 +794,17 @@ async fn handle_has_chunks(
     }
 
     state.stat.has_chunks_count.inc();
+    // A bucket that has never been written simply contains none of the queried chunks.
+    let bucket_id = match lookup_bucket(&state, &bucket) {
+        Some(id) => id,
+        None => return ok_message(Some(String::new())),
+    };
     let pool = Arc::clone(&state.read_pool);
-    let bucket2 = bucket.clone();
     let existing = tryfut!(
         tokio::task::spawn_blocking(move || {
             let chunks: Vec<&str> = s.split('\0').collect();
             let mut conn = pool.acquire();
-            do_has_chunks(&mut conn, &bucket2, &chunks)
+            do_has_chunks(&mut conn, bucket_id, &chunks)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -779,11 +815,16 @@ async fn handle_has_chunks(
     ok_message(Some(existing))
 }
 
-fn do_has_chunks(conn: &mut rusqlite::Connection, bucket: &str, chunks: &[&str]) -> Result<String> {
+fn do_has_chunks(
+    conn: &mut rusqlite::Connection,
+    bucket_id: i64,
+    chunks: &[&str],
+) -> Result<String> {
     debug_assert!(!chunks.is_empty());
-    let mut params: Vec<&str> = vec![bucket];
+    let mut qp: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunks.len() + 1);
+    qp.push(&bucket_id);
     for chunk in chunks {
-        params.push(chunk);
+        qp.push(chunk);
     }
     let mut stmt = conn.prepare(&format!(
         "SELECT hash FROM chunks WHERE bucket=? AND hash IN (?{})",
@@ -791,7 +832,7 @@ fn do_has_chunks(conn: &mut rusqlite::Connection, bucket: &str, chunks: &[&str])
     ))?;
 
     let mut ans = String::new();
-    for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))? {
+    for row in stmt.query_map(qp.as_slice(), |row| row.get(0))? {
         let hash: String = row?;
         if !ans.is_empty() {
             ans.push('\0');
@@ -823,6 +864,7 @@ async fn handle_delete_chunk(
         StatusCode::BAD_REQUEST,
         "Bad chunk"
     );
+    let bucket_id = ensure_bucket(&state, &bucket)?;
     let state2 = Arc::clone(&state);
     let bucket2 = bucket.clone();
     let chunk2 = chunk.clone();
@@ -832,6 +874,7 @@ async fn handle_delete_chunk(
             do_delete_chunks(
                 &mut state2.conn.lock().unwrap(),
                 &bucket2,
+                bucket_id,
                 &[hash.as_str()],
                 &state2.config,
             )
@@ -889,6 +932,7 @@ async fn handle_delete_chunks(
         }
         chunks.len()
     };
+    let bucket_id = ensure_bucket(&state, &bucket)?;
     let state2 = Arc::clone(&state);
     let bucket2 = bucket.clone();
     let count = tryfut!(
@@ -897,6 +941,7 @@ async fn handle_delete_chunks(
             do_delete_chunks(
                 &mut state2.conn.lock().unwrap(),
                 &bucket2,
+                bucket_id,
                 &chunks,
                 &state2.config,
             )
@@ -955,14 +1000,18 @@ async fn handle_list_chunks(
     );
 
     state.stat.list_chunks_count.inc();
-
+    // An unknown bucket has no chunks; return an empty list rather than 404.
+    let bucket_id = match lookup_bucket(&state, &bucket) {
+        Some(id) => id,
+        None => return ok_message(Some(String::new())),
+    };
     let state2 = Arc::clone(&state);
     let pool = Arc::clone(&state.read_pool);
     let bucket2 = bucket.clone();
     let ans = tryfut!(
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.acquire();
-            do_list_chunks(&mut conn, &state2.config, &bucket2, validate)
+            do_list_chunks(&mut conn, &state2.config, &bucket2, bucket_id, validate)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -978,6 +1027,7 @@ fn do_list_chunks(
     conn: &mut rusqlite::Connection,
     config: &Config,
     bucket: &str,
+    bucket_id: i64,
     validate: bool,
 ) -> Result<String> {
     let mut ans = "".to_string();
@@ -989,8 +1039,8 @@ fn do_list_chunks(
     // })?;
     let mut stmt = conn.prepare("SELECT hash, size, has_content, bucket FROM chunks")?;
     let rows = stmt.query_map(params![], |row| {
-        let b: String = row.get(3)?;
-        if b == bucket {
+        let b: i64 = row.get(3)?;
+        if b == bucket_id {
             Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
         } else {
             Ok(None)
@@ -1069,28 +1119,18 @@ fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
 /// `(latest, floor)` for a bucket. `latest` is the newest tombstone sequence number, `floor` the
 /// oldest watermark that can still be served incrementally. A client outside `floor..=latest`
 /// has to rebuild its cache from scratch.
-fn do_delete_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<(i64, i64)> {
-    let bid: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM buckets WHERE bucket=?",
-            params![bucket],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(bid) = bid else {
-        return Ok((0, 0));
-    };
+fn do_delete_status(conn: &mut rusqlite::Connection, bucket_id: i64) -> Result<(i64, i64)> {
     let floor: i64 = conn
         .query_row(
             "SELECT floor FROM deleted_floor WHERE bucket=?",
-            params![bid],
+            params![bucket_id],
             |row| row.get(0),
         )
         .optional()?
         .unwrap_or(0);
     let latest: Option<i64> = conn.query_row(
         "SELECT MAX(id) FROM deleted WHERE bucket=?",
-        params![bid],
+        params![bucket_id],
         |row| row.get(0),
     )?;
     Ok((latest.unwrap_or(floor), floor))
@@ -1112,13 +1152,16 @@ async fn handle_delete_status(
     );
 
     state.stat.delete_status_count.inc();
-
+    // A bucket that has never been written has no tombstones: latest = floor = 0.
+    let bucket_id = match lookup_bucket(&state, &bucket) {
+        Some(id) => id,
+        None => return ok_message(Some("0 0".to_string())),
+    };
     let pool = Arc::clone(&state.read_pool);
-    let bucket2 = bucket.clone();
     let (latest, floor) = tryfut!(
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.acquire();
-            do_delete_status(&mut conn, &bucket2)
+            do_delete_status(&mut conn, bucket_id)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -1132,29 +1175,21 @@ async fn handle_delete_status(
 /// `Ok(None)` means the requested watermark cannot be served incrementally.
 fn do_get_deleted(
     conn: &mut rusqlite::Connection,
-    bucket: &str,
+    bucket_id: i64,
     since: i64,
     prefix_bits: u8,
 ) -> Result<Option<(Vec<u8>, usize)>> {
-    let (latest, floor) = do_delete_status(conn, bucket)?;
+    let (latest, floor) = do_delete_status(conn, bucket_id)?;
     // since > latest means the client's watermark predates a server database reset.
     if since < floor || since > latest {
         return Ok(None);
     }
-    let bid: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM buckets WHERE bucket=?",
-            params![bucket],
-            |row| row.get(0),
-        )
-        .optional()?;
     let mut values: Vec<u64> = Vec::new();
-    if let Some(bid) = bid {
-        let mut stmt =
-            conn.prepare("SELECT prefix FROM deleted WHERE bucket=? AND id>? AND id<=?")?;
-        for row in stmt.query_map(params![bid, since, latest], |row| row.get::<_, i64>(0))? {
-            values.push(crate::tombstone::truncate(row? as u64, prefix_bits));
-        }
+    let mut stmt = conn.prepare("SELECT prefix FROM deleted WHERE bucket=? AND id>? AND id<=?")?;
+    for row in stmt.query_map(params![bucket_id, since, latest], |row| {
+        row.get::<_, i64>(0)
+    })? {
+        values.push(crate::tombstone::truncate(row? as u64, prefix_bits));
     }
     let body = crate::tombstone::encode(&mut values, prefix_bits, latest);
     Ok(Some((body, values.len())))
@@ -1181,14 +1216,22 @@ async fn handle_get_deleted(
     };
 
     state.stat.get_deleted_count.inc();
-
-    let pool = Arc::clone(&state.read_pool);
-    let bucket2 = bucket.clone();
     let prefix_bits = crate::tombstone::DEFAULT_PREFIX_BITS;
+
+    // An unknown bucket has no tombstones (latest = 0): serve an empty list for a since of 0,
+    // and treat any higher watermark as unservable so the client rebuilds from the chunk list.
+    let bucket_id = match lookup_bucket(&state, &bucket) {
+        Some(id) => id,
+        None if since == 0 => {
+            return ok_binary(crate::tombstone::encode(&mut Vec::new(), prefix_bits, 0));
+        }
+        None => return handle_error!(StatusCode::GONE, "Watermark too old", since),
+    };
+    let pool = Arc::clone(&state.read_pool);
     let body = tryfut!(
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.acquire();
-            do_get_deleted(&mut conn, &bucket2, since, prefix_bits)
+            do_get_deleted(&mut conn, bucket_id, since, prefix_bits)
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
