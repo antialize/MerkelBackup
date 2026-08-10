@@ -1112,6 +1112,12 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     let conn = Connection::open(&config.cache_db)?;
 
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Increase the cache size to 1GB (negative value means KB, so -1024*1024 = -1GB).
+    conn.pragma_update(None, "cache_size", -1024 * 1024)?;
+    conn.pragma_update(None, "mmap_size", 2i64 * 1024 * 1024 * 1024)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.busy_timeout(Duration::from_secs(30))?;
 
     // Note that UNIQUE constraints automatically create indexes
     // (according to experimentation).

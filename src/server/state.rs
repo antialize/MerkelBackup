@@ -63,6 +63,33 @@ pub struct State {
     pub stat: Stat,
 }
 
+/// Page cache for the single writer connection, in KiB (negative `cache_size` means KiB rather
+/// than pages).
+pub const WRITER_CACHE_KIB: i64 = -4 * 1024 * 1024;
+
+/// Page cache for each of the read pool connections, in KiB. There are 16 of them, so this is
+/// ~4 GiB total; the memory mapped region is shared with the OS page cache on top of that.
+pub const READER_CACHE_KIB: i64 = -256 * 1024;
+
+/// Size of the memory mapped region, in bytes. Reads are then served straight out of the OS
+/// page cache with no copy into a per-connection buffer. Shared across connections, so setting
+/// it large on all 16 readers costs nothing extra.
+pub const MMAP_BYTES: i64 = 16 * 1024 * 1024 * 1024;
+
+/// Apply the shared performance pragmas to a connection. `cache_kib` is a negative `cache_size`
+/// value (KiB). Called on both the writer and every read pool connection.
+pub fn tune_connection(conn: &Connection, cache_kib: i64) {
+    conn.pragma_update(None, "cache_size", cache_kib)
+        .expect("Cannot set cache_size");
+    conn.pragma_update(None, "mmap_size", MMAP_BYTES)
+        .expect("Cannot set mmap_size");
+    // Sorts and temp b-trees (e.g. the ORDER BY in the deleted-list query) stay in RAM.
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .expect("Cannot set temp_store");
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .expect("Cannot set busy_timeout");
+}
+
 pub fn setup_db(conf: &Config) -> Connection {
     trace!("opening database");
     let conn = Connection::open(format!("{}/backup.db", conf.data_dir))
@@ -70,6 +97,11 @@ pub fn setup_db(conf: &Config) -> Connection {
 
     conn.pragma_update(None, "journal_mode", "WAL")
         .expect("Cannot enable wal");
+    tune_connection(&conn, WRITER_CACHE_KIB);
+    // WAL + NORMAL only risks losing the last committed transaction on power loss, never
+    // corruption, and avoids an fsync per commit. Only meaningful on the writer.
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .expect("Cannot set synchronous");
 
     trace!("Creating chunks table");
     // The chunks table contains metadata for all chunks

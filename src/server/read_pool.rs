@@ -77,6 +77,7 @@ impl ReadConnectionPool {
                     journal_mode
                 );
             }
+            crate::state::tune_connection(&conn, crate::state::READER_CACHE_KIB);
             free.push(conn);
         }
         Arc::new(Self {
