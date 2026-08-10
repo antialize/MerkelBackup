@@ -39,6 +39,9 @@ pub struct Stat {
     pub put_root_count: StatCounter,
     pub get_roots_count: StatCounter,
     pub get_status_count: StatCounter,
+    pub delete_status_count: StatCounter,
+    pub get_deleted_count: StatCounter,
+    pub get_deleted_entries: StatCounter,
     pub list_chunks_count: StatCounter,
     pub list_chunks_entries: StatCounter,
     pub delete_chunks_count: StatCounter,
@@ -123,6 +126,51 @@ pub fn setup_db(conf: &Config) -> Connection {
         [],
     )
     .expect("Unable to deletes cache table");
+
+    trace!("Creating buckets table");
+    // Maps a bucket to a small integer, so the tombstone log does not have to repeat the
+    // 64 character bucket string for every deleted chunk.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS buckets (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             bucket TEXT NOT NULL UNIQUE
+             )",
+        [],
+    )
+    .expect("Unable to create buckets table");
+
+    trace!("Creating deleted table");
+    // Tombstone log. `prefix` holds the top 64 bits of the deleted chunk hash, bit cast to i64;
+    // ordering is done in memory when serving, so the sign does not matter. AUTOINCREMENT rather
+    // than a plain rowid, because retention deletes from the front and plain rowids would be
+    // reused once the table is emptied, breaking client watermarks.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             bucket INTEGER NOT NULL,
+             prefix INTEGER NOT NULL
+             )",
+        [],
+    )
+    .expect("Unable to create deleted table");
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_deleted_bucket_id
+        ON deleted (bucket,id)",
+        [],
+    )
+    .expect("Unable to create deleted table index");
+
+    // The oldest watermark a client may present and still be served incrementally. Rises only
+    // when tombstones are garbage collected; absent means the whole log is still intact.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted_floor (
+             bucket INTEGER PRIMARY KEY,
+             floor INTEGER NOT NULL
+             )",
+        [],
+    )
+    .expect("Unable to create deleted_floor table");
 
     conn
 }

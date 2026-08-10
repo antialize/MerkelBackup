@@ -4,6 +4,8 @@ use abi_stable::std_types::RStr;
 use clap::{Parser, Subcommand};
 mod backup;
 mod shared;
+#[path = "../tombstone.rs"]
+mod tombstone;
 mod visit;
 
 use blake2::{Digest, digest::generic_array::GenericArray};

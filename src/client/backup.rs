@@ -31,7 +31,7 @@ use merkel_backup_plugin::PluginBox;
 use pbr::ProgressBar;
 use rand::TryRng;
 use rand::rngs::SysRng;
-use rusqlite::{Connection, Statement, params};
+use rusqlite::{Connection, OptionalExtension, Statement, params};
 
 use merkel_backup_plugin::Result as PResult;
 
@@ -829,7 +829,65 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
-fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
+/// Read an integer from the `kvp` key/value table.
+fn get_kvp(conn: &Connection, key: &str) -> Result<Option<i64>, Error> {
+    Ok(conn
+        .query_row("SELECT value FROM kvp WHERE key = ?", params![key], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?)
+}
+
+/// Discard the remote cache and repopulate it from the full server chunk list.
+fn rebuild_remote(
+    conn: &Connection,
+    state: &mut State,
+    new_kvp_deleted_seq: Option<i64>,
+) -> Result<(), Error> {
+    let url = format!(
+        "{}/chunks/{}",
+        state.config.server,
+        hex::encode(state.secrets.bucket)
+    );
+    let content = check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .timeout(Duration::from_secs(60 * 60))
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    })?
+    .text()?;
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM remote", [])?;
+    let mut cnt = 0u64;
+    {
+        let mut stmt = tx.prepare(
+            "REPLACE INTO remote (chunk, time, present) VALUES (?, strftime('%s', 'now'), 1)",
+        )?;
+        for row in content.split('\n') {
+            if row.is_empty() {
+                continue;
+            }
+            let chunk = row.split(' ').next().ok_or(Error::Msg("Missing chunk"))?;
+            stmt.execute(params![chunk])?;
+            cnt += 1;
+        }
+    }
+    if let Some(watermark) = new_kvp_deleted_seq {
+        tx.execute(
+            "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+            params![watermark],
+        )?;
+    }
+    tx.commit()?;
+    info!("Remote cache rebuilt from scratch, {cnt} objects reloaded");
+    Ok(())
+}
+
+/// Pre-tombstone-log invalidation, kept so a new client still works against an old server.
+fn legacy_update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
         "{}/status/{}",
         state.config.server,
@@ -853,32 +911,150 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         Some(t) => t < last_delete,
         None => true,
     };
-
     if !should_update_remote {
         return Ok(());
     }
-    conn.execute("DELETE FROM remote", [])?;
+    info!("Prune detected, reloading remote state (legacy server)");
+    rebuild_remote(conn, state, None)
+}
+
+/// Apply a decoded tombstone list to the remote cache.
+fn apply_tombstones(
+    conn: &Connection,
+    decoded: &crate::tombstone::Decoded,
+) -> Result<usize, Error> {
+    let mut matches: Vec<i64> = Vec::new();
+    {
+        // Perform a single full scan of the remote table, comparing each chunk's prefix against the tombstone list.
+        let mut stmt = conn.prepare("SELECT rowid, chunk FROM remote ORDER BY chunk")?;
+        let mut rows = stmt.query([])?;
+        let mut values = decoded.values.iter().peekable();
+
+        while let Some(row) = rows.next()? {
+            if values.peek().is_none() {
+                break;
+            }
+            let rowid: i64 = row.get(0)?;
+            let chunk: String = row.get(1)?;
+            let Some(prefix) = crate::tombstone::prefix_of_hex(&chunk, decoded.prefix_bits) else {
+                continue;
+            };
+            while let Some(&next_prefix) = values.peek()
+                && *next_prefix < prefix
+            {
+                values.next();
+            }
+            // Do not consume the entry: several cached chunks can share a truncated prefix.
+            if let Some(&next_prefix) = values.peek()
+                && *next_prefix == prefix
+            {
+                matches.push(rowid);
+            }
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE remote SET present = 0, time = strftime('%s', 'now') WHERE rowid = ?",
+        )?;
+        for rowid in &matches {
+            stmt.execute(params![rowid])?;
+        }
+    }
+    tx.execute(
+        "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+        params![decoded.last_id],
+    )?;
+    tx.commit()?;
+    Ok(matches.len())
+}
+
+fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
-        "{}/chunks/{}",
+        "{}/delete-status/{}",
         state.config.server,
         hex::encode(state.secrets.bucket)
     );
-    let content = check_response(&mut || {
+    let status = match check_response(&mut || {
         state
             .client
             .get(&url[..])
             .basic_auth(&state.config.user, Some(&state.config.password))
             .send()
-    })?
-    .text()?;
-    let mut cnt = 0;
-    for row in content.split('\n') {
-        let mut row = row.split(' ');
-        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
-        state.update_remote_stmt.execute(params![chunk])?;
-        cnt += 1;
+    }) {
+        Ok(res) => res.text()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => {
+            debug!("Server does not support the tombstone log, using legacy invalidation");
+            return legacy_update_remote(conn, state);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let mut parts = status.split_whitespace();
+    let latest: i64 = parts.next().ok_or(Error::Msg("Missing latest"))?.parse()?;
+    let floor: i64 = parts.next().ok_or(Error::Msg("Missing floor"))?.parse()?;
+
+    let watermark = match get_kvp(conn, "deleted_seq")? {
+        Some(w) => w,
+        None => {
+            let empty: i64 = conn.query_row("SELECT count(*) FROM remote", [], |row| row.get(0))?;
+            if empty == 0 {
+                // Nothing cached, so there is nothing to invalidate. Adopt the current
+                // sequence number so the first real backup starts up to date.
+                conn.execute(
+                    "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+                    params![latest],
+                )?;
+                return Ok(());
+            }
+            info!("Remote cache predates the tombstone log, rebuilding");
+            return rebuild_remote(conn, state, Some(latest));
+        }
+    };
+
+    if watermark == latest {
+        return Ok(());
     }
-    info!("Prune detected. {cnt} objects reloaded from remote state");
+    // watermark > latest means the server database was reset behind our back.
+    if watermark < floor || watermark > latest {
+        info!(
+            "Remote cache is too far behind ({watermark} outside {floor}..={latest}), rebuilding"
+        );
+        return rebuild_remote(conn, state, Some(latest));
+    }
+
+    let url = format!(
+        "{}/deleted/{}?since={}",
+        state.config.server,
+        hex::encode(state.secrets.bucket),
+        watermark
+    );
+    let body = match check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .timeout(Duration::from_secs(200 * 60))
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    }) {
+        Ok(res) => res.bytes()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::GONE)) => {
+            info!("Server no longer retains tombstones from {watermark}, rebuilding");
+            return rebuild_remote(conn, state, Some(latest));
+        }
+        Err(e) => return Err(e),
+    };
+
+    let decoded = crate::tombstone::decode(&body).map_err(Error::Tombstone)?;
+    let marked = apply_tombstones(conn, &decoded)?;
+    info!(
+        "Prune detected. {} deleted chunks reported, {} cached entries invalidated, sequence {} -> {}",
+        decoded.values.len(),
+        marked,
+        watermark,
+        decoded.last_id
+    );
     Ok(())
 }
 
@@ -975,6 +1151,16 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         [],
     )?;
 
+    // Bookkeeping for the remote cache, currently just 'deleted_seq': the tombstone sequence
+    // number the cache has been brought up to date with.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS kvp (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Check if the server changed since last backup, if so clear the remote cache
     match conn.query_one("SELECT server FROM remote_server", [], |row| {
         row.get::<_, String>(0)
@@ -982,6 +1168,7 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         Ok(v) if v != config.server => {
             error!("Remote server changed, clearing remote cache");
             conn.execute("DELETE FROM remote", [])?;
+            conn.execute("DELETE FROM kvp", [])?;
             conn.execute("DELETE FROM remote_server", [])?;
             conn.execute(
                 "INSERT INTO remote_server (server) VALUES (?)",

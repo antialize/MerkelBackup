@@ -1,10 +1,12 @@
 use base64::Engine;
 use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use hyper::body::Incoming;
 use hyper::header::CONTENT_LENGTH;
 use hyper::{Method, Request, Response, StatusCode};
 use rand::TryRng;
 use rand::rngs::SysRng;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -57,6 +59,23 @@ fn ok_message(message: Option<String>) -> ResponseFuture {
             None => Full::from(""),
         })
         .unwrap())
+}
+
+/// Construct a http ok response with a binary body
+fn ok_binary(body: Vec<u8>) -> ResponseFuture {
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(Full::from(Bytes::from(body)))
+        .unwrap())
+}
+
+/// Look up a single key in a url query string.
+fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then_some(v)
+    })
 }
 
 /// Construct an unauthorize http response
@@ -433,6 +452,19 @@ fn do_get_chunk(
     Ok(Some((content, size)))
 }
 
+/// Look up the small integer id for a bucket, creating it if needed.
+fn bucket_id(tx: &rusqlite::Transaction, bucket: &str) -> Result<i64> {
+    tx.execute(
+        "INSERT OR IGNORE INTO buckets (bucket) VALUES (?)",
+        params![bucket],
+    )?;
+    Ok(tx.query_row(
+        "SELECT id FROM buckets WHERE bucket = ?",
+        params![bucket],
+        |row| row.get(0),
+    )?)
+}
+
 fn do_delete_chunks(
     conn: &mut rusqlite::Connection,
     bucket: &str,
@@ -447,32 +479,38 @@ fn do_delete_chunks(
     for chunk in chunks {
         params.push(chunk)
     }
-    let mut stmt = conn.prepare(&format!(
-        "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
-        ", ?".repeat(chunks.len() - 1)
-    ))?;
+
+    let tx = conn.transaction()?;
+    let bid = bucket_id(&tx, bucket)?;
 
     let mut internal_chunks = Vec::new();
-    for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })? {
-        // TODO(rav): Make has_content NOT NULL in the database
-        let (id, chunk, has_content): (usize, String, Option<bool>) = row?;
-        let has_content = has_content == Some(true);
-        if has_content {
-            internal_chunks.push(id);
-        } else {
-            let path = chunk_path(&config.data_dir, bucket, &chunk);
-            match std::fs::remove_file(path) {
-                Ok(_) => (),
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => return Err(Error::Server("Delete failed")),
+    let mut external_paths = Vec::new();
+    let mut prefixes: Vec<i64> = Vec::new();
+    {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id, hash, has_content FROM chunks WHERE bucket=? AND hash IN (?{})",
+            ", ?".repeat(chunks.len() - 1)
+        ))?;
+
+        for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })? {
+            // TODO(rav): Make has_content NOT NULL in the database
+            let (id, chunk, has_content): (usize, String, Option<bool>) = row?;
+            let has_content = has_content == Some(true);
+            if has_content {
+                internal_chunks.push(id);
+            } else {
+                external_paths.push(chunk_path(&config.data_dir, bucket, &chunk));
             }
+            let prefix = crate::tombstone::hash_prefix64(&chunk)
+                .ok_or(Error::Server("Bad hash in chunks table"))?;
+            prefixes.push(prefix as i64);
         }
     }
 
     if !internal_chunks.is_empty() {
-        conn.execute(
+        tx.execute(
             &format!(
                 "DELETE FROM chunk_content WHERE chunk_id IN (?{})",
                 ", ?".repeat(internal_chunks.len() - 1)
@@ -481,7 +519,7 @@ fn do_delete_chunks(
         )?;
     }
 
-    let count = conn.execute(
+    let count = tx.execute(
         &format!(
             "DELETE FROM chunks WHERE bucket=? AND hash IN (?{})",
             ", ?".repeat(chunks.len() - 1)
@@ -489,10 +527,31 @@ fn do_delete_chunks(
         rusqlite::params_from_iter(params.iter()),
     )?;
 
-    conn.execute(
+    {
+        let mut stmt = tx.prepare("INSERT INTO deleted (bucket, prefix) VALUES (?, ?)")?;
+        for prefix in &prefixes {
+            stmt.execute(params![bid, prefix])?;
+        }
+    }
+
+    // Kept for clients that predate the tombstone log; they still invalidate on this timestamp.
+    tx.execute(
         "REPLACE INTO deletes VALUES (?, strftime('%s', 'now'))",
         params![bucket],
     )?;
+
+    tx.commit()?;
+
+    // Only unlink once the removal is durable. A crash here leaks a file whose row is already
+    // gone, which is harmless; unlinking first could leave rows pointing at missing data.
+    for path in external_paths {
+        match std::fs::remove_file(path) {
+            Ok(_) => (),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err(Error::Server("Delete failed")),
+        }
+    }
+
     Ok(count)
 }
 
@@ -1007,6 +1066,154 @@ fn do_get_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<i64> {
     }
 }
 
+/// `(latest, floor)` for a bucket. `latest` is the newest tombstone sequence number, `floor` the
+/// oldest watermark that can still be served incrementally. A client outside `floor..=latest`
+/// has to rebuild its cache from scratch.
+fn do_delete_status(conn: &mut rusqlite::Connection, bucket: &str) -> Result<(i64, i64)> {
+    let bid: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM buckets WHERE bucket=?",
+            params![bucket],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(bid) = bid else {
+        return Ok((0, 0));
+    };
+    let floor: i64 = conn
+        .query_row(
+            "SELECT floor FROM deleted_floor WHERE bucket=?",
+            params![bid],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let latest: Option<i64> = conn.query_row(
+        "SELECT MAX(id) FROM deleted WHERE bucket=?",
+        params![bid],
+        |row| row.get(0),
+    )?;
+    Ok((latest.unwrap_or(floor), floor))
+}
+
+async fn handle_delete_status(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
+        warn!("Unauthorized access for delete status {bucket}");
+        return res;
+    }
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+
+    state.stat.delete_status_count.inc();
+
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
+    let (latest, floor) = tryfut!(
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_delete_status(&mut conn, &bucket2)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Database error",
+    );
+    ok_message(Some(format!("{latest} {floor}")))
+}
+
+/// `Ok(None)` means the requested watermark cannot be served incrementally.
+fn do_get_deleted(
+    conn: &mut rusqlite::Connection,
+    bucket: &str,
+    since: i64,
+    prefix_bits: u8,
+) -> Result<Option<(Vec<u8>, usize)>> {
+    let (latest, floor) = do_delete_status(conn, bucket)?;
+    // since > latest means the client's watermark predates a server database reset.
+    if since < floor || since > latest {
+        return Ok(None);
+    }
+    let bid: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM buckets WHERE bucket=?",
+            params![bucket],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut values: Vec<u64> = Vec::new();
+    if let Some(bid) = bid {
+        let mut stmt =
+            conn.prepare("SELECT prefix FROM deleted WHERE bucket=? AND id>? AND id<=?")?;
+        for row in stmt.query_map(params![bid, since, latest], |row| row.get::<_, i64>(0))? {
+            values.push(crate::tombstone::truncate(row? as u64, prefix_bits));
+        }
+    }
+    let body = crate::tombstone::encode(&mut values, prefix_bits, latest);
+    Ok(Some((body, values.len())))
+}
+
+async fn handle_get_deleted(
+    bucket: String,
+    req: Request<Incoming>,
+    state: Arc<State>,
+) -> ResponseFuture {
+    if let Err(res) = check_auth(&req, &state, AccessType::Put) {
+        warn!("Unauthorized access for get deleted {bucket}");
+        return res;
+    }
+    tryfut!(
+        check_hash(bucket.as_ref()),
+        StatusCode::BAD_REQUEST,
+        "Bad bucket"
+    );
+
+    let since = match query_param(req.uri().query(), "since").map(|v| v.parse::<i64>()) {
+        Some(Ok(v)) if v >= 0 => v,
+        _ => return handle_error!(StatusCode::BAD_REQUEST, "Missing or bad since", ""),
+    };
+
+    state.stat.get_deleted_count.inc();
+
+    let pool = Arc::clone(&state.read_pool);
+    let bucket2 = bucket.clone();
+    let prefix_bits = crate::tombstone::DEFAULT_PREFIX_BITS;
+    let body = tryfut!(
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.acquire();
+            do_get_deleted(&mut conn, &bucket2, since, prefix_bits)
+        })
+        .await
+        .map_err(|_| crate::error::Error::Server("blocking task panicked"))
+        .and_then(|r| r),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "do_get_deleted failed"
+    );
+    match body {
+        Some((body, entries)) => {
+            state.stat.get_deleted_entries.add(entries);
+            info!(
+                "{}:{}: deleted list for {} since {} is {} entries in {} bytes",
+                file!(),
+                line!(),
+                bucket,
+                since,
+                entries,
+                body.len()
+            );
+            ok_binary(body)
+        }
+        None => handle_error!(StatusCode::GONE, "Watermark too old", since),
+    }
+}
+
 async fn handle_get_roots(
     bucket: String,
     req: Request<Incoming>,
@@ -1249,6 +1456,9 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
         (&s.put_root_count, "put_root_count_total"),
         (&s.get_roots_count, "get_roots_count_total"),
         (&s.get_status_count, "get_status_count_total"),
+        (&s.delete_status_count, "delete_status_count_total"),
+        (&s.get_deleted_count, "get_deleted_count_total"),
+        (&s.get_deleted_entries, "get_deleted_entries_total"),
         (&s.list_chunks_count, "list_chunks_count_total"),
         (&s.list_chunks_entries, "list_chunks_entries_total"),
         (&s.delete_chunks_count, "delete_chunks_count_total"),
@@ -1275,8 +1485,8 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
     // so we use the max id instead, which is faster. See also:
     // https://stackoverflow.com/q/8988915/sqlite-count-slow-on-big-tables
     let pool = Arc::clone(&state.read_pool);
-    let (roots_max_id, chunks_max_id, deletes_count): (i64, i64, i64) = tryfut!(
-        tokio::task::spawn_blocking(move || -> crate::error::Result<(i64, i64, i64)> {
+    let (roots_max_id, chunks_max_id, deletes_count, deleted_max_id): (i64, i64, i64, i64) = tryfut!(
+        tokio::task::spawn_blocking(move || -> crate::error::Result<(i64, i64, i64, i64)> {
             let conn = pool.acquire();
             let roots_max_id: i64 =
                 conn.query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| row.get(0))?;
@@ -1286,7 +1496,13 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
             // so use a full table scan with COUNT(*).
             let deletes_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM deletes LIMIT 1", [], |row| row.get(0))?;
-            Ok((roots_max_id, chunks_max_id, deletes_count))
+            let deleted_max_id: i64 = conn
+                .query_row("SELECT MAX(`id`) FROM deleted LIMIT 1", [], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .unwrap_or(0);
+            Ok((roots_max_id, chunks_max_id, deletes_count, deleted_max_id))
         })
         .await
         .map_err(|_| crate::error::Error::Server("blocking task panicked"))
@@ -1299,7 +1515,8 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
         ans,
         "merkelbackup_rows_count{{merkelbackup_table=\"roots\"}} {roots_max_id}\n\
         merkelbackup_rows_count{{merkelbackup_table=\"chunks\"}} {chunks_max_id}\n\
-        merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {deletes_count}\n\n",
+        merkelbackup_rows_count{{merkelbackup_table=\"deletes\"}} {deletes_count}\n\
+        merkelbackup_rows_count{{merkelbackup_table=\"deleted\"}} {deleted_max_id}\n\n",
     )
     .unwrap();
 
@@ -1333,6 +1550,10 @@ pub async fn backup_serve(req: Request<Incoming>, state: Arc<State>) -> Response
         .collect();
     if req.method() == Method::GET && path.len() == 3 && path[1] == "status" {
         handle_get_status(path[2].clone(), req, state).await
+    } else if req.method() == Method::GET && path.len() == 3 && path[1] == "delete-status" {
+        handle_delete_status(path[2].clone(), req, state).await
+    } else if req.method() == Method::GET && path.len() == 3 && path[1] == "deleted" {
+        handle_get_deleted(path[2].clone(), req, state).await
     } else if req.method() == Method::GET && path.len() == 4 && path[1] == "chunks" {
         handle_get_chunk(path[2].clone(), path[3].clone(), req, state, false).await
     } else if req.method() == Method::PUT && path.len() == 4 && path[1] == "chunks" {

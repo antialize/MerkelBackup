@@ -20,6 +20,8 @@ mod handler;
 mod read_pool;
 use handler::backup_serve;
 mod state;
+#[path = "../tombstone.rs"]
+mod tombstone;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use state::{Stat, State, setup_db};
@@ -80,6 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             put_root_count: Default::default(),
             get_roots_count: Default::default(),
             get_status_count: Default::default(),
+            delete_status_count: Default::default(),
+            get_deleted_count: Default::default(),
+            get_deleted_entries: Default::default(),
             list_chunks_count: Default::default(),
             list_chunks_entries: Default::default(),
             delete_chunks_count: Default::default(),
