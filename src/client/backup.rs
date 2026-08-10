@@ -48,6 +48,9 @@ const BATCH_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 const PENDING_VERIFY_FLUSH_THRESHOLD: usize = 50_000;
 // Number of concurrent upload workers (each handles encryption + HTTP independently).
 const N_UPLOAD_WORKERS: usize = 4;
+// If a prune keeps deleting chunks across this many backup passes, stop re-running and warn;
+// the residual is left for the next backup rather than looping forever against a live prune.
+const MAX_CONCURRENT_PRUNE_PASSES: usize = 4;
 
 // Upload pipeline
 
@@ -970,7 +973,44 @@ fn apply_tombstones(
     Ok(matches.len())
 }
 
-fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
+/// Fetch just the latest tombstone sequence number, or `None` if the server predates the
+/// tombstone log. Used to detect whether a prune deleted anything while a backup ran.
+fn fetch_delete_latest(state: &mut State) -> Result<Option<i64>, Error> {
+    let url = format!(
+        "{}/delete-status/{}",
+        state.config.server,
+        hex::encode(state.secrets.bucket)
+    );
+    let status = match check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    }) {
+        Ok(res) => res.text()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let latest: i64 = status
+        .split_whitespace()
+        .next()
+        .ok_or(Error::Msg("Missing latest"))?
+        .parse()?;
+    Ok(Some(latest))
+}
+
+/// Result of bringing the remote cache up to date.
+struct RemoteUpdate {
+    /// The tombstone sequence the cache is now valid for, or `None` against a legacy server.
+    synced: Option<i64>,
+    /// Number of cache entries this call invalidated (set `present = 0`). On a re-run this being
+    /// zero means the concurrent prune did not touch any chunk we hold. `usize::MAX` when a full
+    /// rebuild happened and the count is not meaningful, which forces a conservative re-scan.
+    invalidated: usize,
+}
+
+fn update_remote(conn: &Connection, state: &mut State) -> Result<RemoteUpdate, Error> {
     let url = format!(
         "{}/delete-status/{}",
         state.config.server,
@@ -986,7 +1026,11 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         Ok(res) => res.text()?,
         Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => {
             debug!("Server does not support the tombstone log, using legacy invalidation");
-            return legacy_update_remote(conn, state);
+            legacy_update_remote(conn, state)?;
+            return Ok(RemoteUpdate {
+                synced: None,
+                invalidated: 0,
+            });
         }
         Err(e) => return Err(e),
     };
@@ -1006,22 +1050,36 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
                     "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
                     params![latest],
                 )?;
-                return Ok(());
+                return Ok(RemoteUpdate {
+                    synced: Some(latest),
+                    invalidated: 0,
+                });
             }
             info!("Remote cache predates the tombstone log, rebuilding");
-            return rebuild_remote(conn, state, Some(latest));
+            rebuild_remote(conn, state, Some(latest))?;
+            return Ok(RemoteUpdate {
+                synced: Some(latest),
+                invalidated: usize::MAX,
+            });
         }
     };
 
     if watermark == latest {
-        return Ok(());
+        return Ok(RemoteUpdate {
+            synced: Some(latest),
+            invalidated: 0,
+        });
     }
     // watermark > latest means the server database was reset behind our back.
     if watermark < floor || watermark > latest {
         info!(
             "Remote cache is too far behind ({watermark} outside {floor}..={latest}), rebuilding"
         );
-        return rebuild_remote(conn, state, Some(latest));
+        rebuild_remote(conn, state, Some(latest))?;
+        return Ok(RemoteUpdate {
+            synced: Some(latest),
+            invalidated: usize::MAX,
+        });
     }
 
     let url = format!(
@@ -1041,7 +1099,11 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         Ok(res) => res.bytes()?,
         Err(Error::HttpStatus(reqwest::StatusCode::GONE)) => {
             info!("Server no longer retains tombstones from {watermark}, rebuilding");
-            return rebuild_remote(conn, state, Some(latest));
+            rebuild_remote(conn, state, Some(latest))?;
+            return Ok(RemoteUpdate {
+                synced: Some(latest),
+                invalidated: usize::MAX,
+            });
         }
         Err(e) => return Err(e),
     };
@@ -1055,7 +1117,10 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         watermark,
         decoded.last_id
     );
-    Ok(())
+    Ok(RemoteUpdate {
+        synced: Some(decoded.last_id),
+        invalidated: marked,
+    })
 }
 
 /// Batch-verify the chunk hashes currently accumulated in `pending_verify`
@@ -1242,179 +1307,230 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         },
     };
 
-    // Spawn upload worker pool with a shared task receiver.
-    {
-        let (task_tx, task_rx) = crossbeam_channel::bounded::<UploadTask>(N_UPLOAD_WORKERS * 2);
-        let (result_tx, result_rx) =
-            crossbeam_channel::bounded::<UploadResult>(N_UPLOAD_WORKERS * 16);
-        let key = state.secrets.key;
-        let server = state.config.server.clone();
-        let bucket_hex = hex::encode(state.secrets.bucket);
-        let user = state.config.user.clone();
-        let password = state.config.password.clone();
-        for _ in 0..N_UPLOAD_WORKERS {
-            let task_rx = task_rx.clone();
-            let result_tx = result_tx.clone();
-            let server = server.clone();
-            let bucket_hex = bucket_hex.clone();
-            let user = user.clone();
-            let password = password.clone();
-            std::thread::spawn(move || {
-                upload_worker(key, server, bucket_hex, user, password, task_rx, result_tx);
+    let dirs = state.config.backup_dirs.clone();
+    let mut pass: usize = 0;
+    loop {
+        // Reset the per-pass accumulators. A no-op on the first pass; on a re-run after a
+        // concurrent prune it clears the previous pass so the scan/upload can run again.
+        state.scan = true;
+        state.progress = None;
+        state.transfer_bytes = 0;
+        state.modified_files_count = 0;
+        state.transfered_bytes = 0;
+        state.conflict_bytes = 0;
+        state.skipped_bytes = 0;
+        state.entries.clear();
+        state.plugin_entries.clear();
+        state.pending_verify.clear();
+        state.pending_batch.clear();
+        state.pending_batch_bytes = 0;
+        state.scan_files_count = 0;
+        state.upload_files_new = 0;
+        state.upload_files_unchanged = 0;
+
+        let update = update_remote(&conn, &mut state)?;
+        if pass > 0 && update.invalidated == 0 {
+            // The prune that triggered this re-run deleted nothing this client holds, so the
+            // root stored on the previous pass already references only live chunks.
+            info!("Concurrent prune did not affect this backup; keeping the previous root");
+            break;
+        }
+
+        // Spawn upload worker pool with a shared task receiver.
+        {
+            let (task_tx, task_rx) = crossbeam_channel::bounded::<UploadTask>(N_UPLOAD_WORKERS * 2);
+            let (result_tx, result_rx) =
+                crossbeam_channel::bounded::<UploadResult>(N_UPLOAD_WORKERS * 16);
+            let key = state.secrets.key;
+            let server = state.config.server.clone();
+            let bucket_hex = hex::encode(state.secrets.bucket);
+            let user = state.config.user.clone();
+            let password = state.config.password.clone();
+            for _ in 0..N_UPLOAD_WORKERS {
+                let task_rx = task_rx.clone();
+                let result_tx = result_tx.clone();
+                let server = server.clone();
+                let bucket_hex = bucket_hex.clone();
+                let user = user.clone();
+                let password = password.clone();
+                std::thread::spawn(move || {
+                    upload_worker(key, server, bucket_hex, user, password, task_rx, result_tx);
+                });
+            }
+            state.upload_tx = task_tx;
+            state.upload_rx = result_rx;
+        }
+
+        for dir in dirs.iter() {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                info!("Skipping {}", dir);
+                continue;
+            }
+            info!("Scanning {}", dir);
+            backup_folder(path, &mut state)?;
+        }
+
+        for plugin in plugins.iter_mut() {
+            info!("Scanning plugin {}: {}", plugin.plugin(), plugin.name());
+            state.plugin = plugin.plugin();
+            state.plugin_name = plugin.name();
+            let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+            plugin.scan(state).into_result().map_err(Error::Plugin)?;
+        }
+
+        if state.config.verbosity >= Level::Info {
+            state.progress = Some({
+                let mut p = ProgressBar::new(state.transfer_bytes);
+                p.set_max_refresh_rate(Some(Duration::from_millis(500)));
+                p.set_units(pbr::Units::Bytes);
+                p.set_width(Some(140));
+                p.show_speed = true;
+                p
             });
         }
-        state.upload_tx = task_tx;
-        state.upload_rx = result_rx;
-    }
 
-    update_remote(&conn, &mut state)?;
-
-    let dirs = state.config.backup_dirs.clone();
-    for dir in dirs.iter() {
-        let path = Path::new(dir);
-        if !path.is_dir() {
-            info!("Skipping {}", dir);
-            continue;
-        }
-        info!("Scanning {}", dir);
-        backup_folder(path, &mut state)?;
-    }
-
-    for plugin in plugins.iter_mut() {
-        info!("Scanning plugin {}: {}", plugin.plugin(), plugin.name());
-        state.plugin = plugin.plugin();
-        state.plugin_name = plugin.name();
-        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
-        plugin.scan(state).into_result().map_err(Error::Plugin)?;
-    }
-
-    if state.config.verbosity >= Level::Info {
-        state.progress = Some({
-            let mut p = ProgressBar::new(state.transfer_bytes);
-            p.set_max_refresh_rate(Some(Duration::from_millis(500)));
-            p.set_units(pbr::Units::Bytes);
-            p.set_width(Some(140));
-            p.show_speed = true;
-            p
-        });
-    }
-
-    let t2 = SystemTime::now();
-    info!(
-        "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
-        t2.duration_since(t1),
-        state.modified_files_count,
-        state.transfer_bytes
-    );
-
-    state.entries.clear();
-    state.plugin_entries.clear();
-    flush_pending_verify(&mut state)?;
-    state.scan = false;
-    for dir in dirs.iter() {
-        let path = Path::new(dir);
-        if !path.is_dir() {
-            info!("Skipping {}", dir);
-            continue;
-        }
-        info!("Backing up {}", dir);
-        let before_new = state.upload_files_new;
-        let before_unchanged = state.upload_files_unchanged;
-
-        let md = fs::metadata(path)?;
-        state.entries.push(DirEnt {
-            path: dir.to_string(),
-            etype: EType::Dir,
-            content: "0".to_string(),
-            size: 0,
-            mode: md.st_mode() & 0xFFF,
-            uid: md.st_uid(),
-            gid: md.st_gid(),
-            mtime: md.st_mtime(),
-            ctime: md.st_ctime(),
-        });
-        backup_folder(path, &mut state)?;
+        let t2 = SystemTime::now();
         info!(
-            "Finished {}: {} new files, {} unchanged files",
-            dir,
-            state.upload_files_new - before_new,
-            state.upload_files_unchanged - before_unchanged
+            "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
+            t2.duration_since(t1),
+            state.modified_files_count,
+            state.transfer_bytes
         );
-    }
 
-    for plugin in plugins.iter_mut() {
-        info!("Backing up plugin {}: {}", plugin.plugin(), plugin.name());
-        state.plugin = plugin.plugin();
-        state.plugin_name = plugin.name();
-        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
-        plugin.backup(state).into_result().map_err(Error::Plugin)?;
-    }
+        state.entries.clear();
+        state.plugin_entries.clear();
+        flush_pending_verify(&mut state)?;
+        state.scan = false;
+        for dir in dirs.iter() {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                info!("Skipping {}", dir);
+                continue;
+            }
+            info!("Backing up {}", dir);
+            let before_new = state.upload_files_new;
+            let before_unchanged = state.upload_files_unchanged;
 
-    let t3 = SystemTime::now();
-    info!(
-        "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
-        t3.duration_since(t2),
-        state.transfered_bytes,
-        state.conflict_bytes,
-        state.skipped_bytes
-    );
-
-    info!("Storing root");
-
-    let mut ans = "".to_string();
-    for ent in state.entries.iter() {
-        if !ans.is_empty() {
-            ans.push('\0');
-            ans.push('\0');
+            let md = fs::metadata(path)?;
+            state.entries.push(DirEnt {
+                path: dir.to_string(),
+                etype: EType::Dir,
+                content: "0".to_string(),
+                size: 0,
+                mode: md.st_mode() & 0xFFF,
+                uid: md.st_uid(),
+                gid: md.st_gid(),
+                mtime: md.st_mtime(),
+                ctime: md.st_ctime(),
+            });
+            backup_folder(path, &mut state)?;
+            info!(
+                "Finished {}: {} new files, {} unchanged files",
+                dir,
+                state.upload_files_new - before_new,
+                state.upload_files_unchanged - before_unchanged
+            );
         }
-        ans.push_str(&format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            ent.path,
-            ent.etype,
-            ent.size,
-            ent.content,
-            ent.mode,
-            ent.uid,
-            ent.gid,
-            ent.mtime,
-            ent.ctime,
+
+        for plugin in plugins.iter_mut() {
+            info!("Backing up plugin {}: {}", plugin.plugin(), plugin.name());
+            state.plugin = plugin.plugin();
+            state.plugin_name = plugin.name();
+            let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+            plugin.backup(state).into_result().map_err(Error::Plugin)?;
+        }
+
+        let t3 = SystemTime::now();
+        info!(
+            "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
+            t3.duration_since(t2),
+            state.transfered_bytes,
+            state.conflict_bytes,
+            state.skipped_bytes
+        );
+
+        info!("Storing root");
+
+        let mut ans = "".to_string();
+        for ent in state.entries.iter() {
+            if !ans.is_empty() {
+                ans.push('\0');
+                ans.push('\0');
+            }
+            ans.push_str(&format!(
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                ent.path,
+                ent.etype,
+                ent.size,
+                ent.content,
+                ent.mode,
+                ent.uid,
+                ent.gid,
+                ent.mtime,
+                ent.ctime,
+            ));
+        }
+        for ent in state.plugin_entries.iter() {
+            if !ans.is_empty() {
+                ans.push('\0');
+                ans.push('\0');
+            }
+            ans.push_str(ent);
+        }
+
+        let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
+
+        // Flush any remaining buffered small chunks, then drop the sender so workers
+        // exit after draining the queue, and process all remaining results.
+        send_pending_batch(&mut state)?;
+        drop(std::mem::replace(
+            &mut state.upload_tx,
+            crossbeam_channel::bounded(0).0,
         ));
-    }
-    for ent in state.plugin_entries.iter() {
-        if !ans.is_empty() {
-            ans.push('\0');
-            ans.push('\0');
+        while let Ok(result) = state.upload_rx.recv() {
+            process_upload_result(&mut state, result)?;
         }
-        ans.push_str(ent);
+
+        let url = format!(
+            "{}/roots/{}/{}",
+            state.config.server,
+            hex::encode(state.secrets.bucket),
+            state.config.hostname
+        );
+
+        check_response(&mut || {
+            state
+                .client
+                .put(&url[..])
+                .basic_auth(&state.config.user, Some(&state.config.password))
+                .body(root.clone())
+                .send()
+        })?;
+
+        // If a prune deleted chunks while this pass ran, the root we just stored may reference a
+        // swept chunk. Re-run: the next update_remote pulls those tombstones, marks the chunks
+        // absent, and the re-scan re-uploads them, which repairs both the new root and this one.
+        match update.synced {
+            None => break, // legacy server: no tombstone counter to compare against
+            Some(synced) => match fetch_delete_latest(&mut state)? {
+                Some(latest_now) if latest_now != synced => {
+                    pass += 1;
+                    if pass >= MAX_CONCURRENT_PRUNE_PASSES {
+                        error!(
+                            "A prune kept deleting across {pass} backup passes; the stored root \
+                             may reference swept chunks and will be repaired by the next backup"
+                        );
+                        break;
+                    }
+                    info!(
+                        "A prune deleted chunks during the backup (sequence {synced} -> \
+                         {latest_now}); re-running to re-upload any swept chunks"
+                    );
+                }
+                _ => break,
+            },
+        }
     }
-
-    let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
-
-    // Flush any remaining buffered small chunks, then drop the sender so workers
-    // exit after draining the queue, and process all remaining results.
-    send_pending_batch(&mut state)?;
-    drop(std::mem::replace(
-        &mut state.upload_tx,
-        crossbeam_channel::bounded(0).0,
-    ));
-    while let Ok(result) = state.upload_rx.recv() {
-        process_upload_result(&mut state, result)?;
-    }
-
-    let url = format!(
-        "{}/roots/{}/{}",
-        state.config.server,
-        hex::encode(state.secrets.bucket),
-        state.config.hostname
-    );
-
-    check_response(&mut || {
-        state
-            .client
-            .put(&url[..])
-            .basic_auth(&state.config.user, Some(&state.config.password))
-            .body(root.clone())
-            .send()
-    })?;
     Ok(())
 }
