@@ -267,9 +267,9 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
 
     let url = format!(
         "{}/chunks/{}/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket),
-        &chunk
+        chunk
     );
     let res = retry(&mut || {
         state
@@ -321,7 +321,7 @@ fn has_chunks_remote(chunks: &[&str], state: &mut State) -> Result<ChunksResult,
     debug_assert!(!chunks.is_empty());
     let url = format!(
         "{}/chunks/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket),
     );
     let body = chunks.join("\0");
@@ -783,7 +783,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             let content = match backup_file(&path, md.len(), mtime, state) {
                 Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    error!("Unable to backup file {}: {:?}\n", &path_string, e);
+                    error!("Unable to backup file {}: {:?}\n", path_string, e);
                     continue;
                 }
                 Ok(v) => v,
@@ -832,7 +832,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
 fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
         "{}/status/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket)
     );
 
@@ -860,7 +860,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     conn.execute("DELETE FROM remote", [])?;
     let url = format!(
         "{}/chunks/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket)
     );
     let content = check_response(&mut || {
@@ -1080,10 +1080,10 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     for dir in dirs.iter() {
         let path = Path::new(dir);
         if !path.is_dir() {
-            info!("Skipping {}", &dir);
+            info!("Skipping {}", dir);
             continue;
         }
-        info!("Scanning {}", &dir);
+        info!("Scanning {}", dir);
         backup_folder(path, &mut state)?;
     }
 
@@ -1121,10 +1121,10 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     for dir in dirs.iter() {
         let path = Path::new(dir);
         if !path.is_dir() {
-            info!("Skipping {}", &dir);
+            info!("Skipping {}", dir);
             continue;
         }
-        info!("Backing up {}", &dir);
+        info!("Backing up {}", dir);
         let before_new = state.upload_files_new;
         let before_unchanged = state.upload_files_unchanged;
 
@@ -1210,9 +1210,9 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
 
     let url = format!(
         "{}/roots/{}/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket),
-        &state.config.hostname
+        state.config.hostname
     );
 
     check_response(&mut || {

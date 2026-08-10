@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = state.config.bind.parse().expect("Bad bind address");
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    info!("Server listening on {}", &state.config.bind);
+    info!("Server listening on {}", state.config.bind);
     info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
     sd_notify::notify(&[sd_notify::NotifyState::Ready]).unwrap();
 

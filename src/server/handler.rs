@@ -132,7 +132,7 @@ fn chunk_path(data_dir: &str, bucket: &str, chunk: &str) -> String {
     format!(
         "{}/data/{}/{}/{}",
         data_dir,
-        &bucket,
+        bucket,
         &chunk[..2],
         &chunk[2..]
     )

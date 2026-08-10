@@ -249,17 +249,13 @@ fn parse_config() -> Result<(Config, Commands), Error> {
         Some(path) => {
             // The config file contains plaintext passwords; refuse to load it
             // if it is readable by group or other.
-            match std::fs::metadata(&path) {
-                Ok(meta) => {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = meta.permissions().mode();
-                    if mode & 0o077 != 0 {
-                        return Err(Error::Msg(
-                            "Config file has unsafe permissions, run: chmod 600 <config>",
-                        ));
-                    }
-                }
-                Err(e) => return Err(e.into()),
+            let meta = std::fs::metadata(&path)?;
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(Error::Msg(
+                    "Config file has unsafe permissions, run: chmod 600 <config>",
+                ));
             }
             toml::from_str(&std::fs::read_to_string(path)?)?
         }
@@ -343,7 +339,7 @@ fn parse_config() -> Result<(Config, Commands), Error> {
 
 fn list_roots(host_name: Option<&str>, config: Config, secrets: Secrets) -> Result<(), Error> {
     let client = reqwest::blocking::Client::new();
-    let url = format!("{}/roots/{}", &config.server, hex::encode(secrets.bucket));
+    let url = format!("{}/roots/{}", config.server, hex::encode(secrets.bucket));
     let res = check_response(&mut || {
         client
             .get(&url[..])
@@ -385,7 +381,7 @@ fn delete_root(root: &str, config: Config, secrets: Secrets) -> Result<(), Error
         Some(Ok(root)) => {
             let url = format!(
                 "{}/roots/{}/{}",
-                &config.server,
+                config.server,
                 hex::encode(secrets.bucket),
                 root.id
             );
