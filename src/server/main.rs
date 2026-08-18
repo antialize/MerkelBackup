@@ -11,7 +11,10 @@ extern crate toml;
 extern crate log;
 extern crate base64;
 extern crate chrono;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 
 mod config;
 mod error;
@@ -20,6 +23,8 @@ mod handler;
 mod read_pool;
 use handler::backup_serve;
 mod state;
+#[path = "../tombstone.rs"]
+mod tombstone;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use state::{Stat, State, setup_db};
@@ -60,11 +65,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("mbackupd version {}", env!("CARGO_PKG_VERSION"));
     debug!("Config {config:?}");
     let conn = Mutex::new(setup_db(&config));
+
+    let buckets = {
+        let conn = conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, bucket FROM buckets")?;
+        let mut buckets = HashMap::new();
+        for row in stmt.query_map((), |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (id, bucket): (i64, String) = row?;
+            buckets.insert(bucket, id);
+        }
+        RwLock::new(buckets)
+    };
+
     let read_pool = read_pool::ReadConnectionPool::new(&config, 16);
     let state = Arc::new(State {
         config,
         conn,
         read_pool,
+        buckets,
         stat: Stat {
             put_chunk_already_there: Default::default(),
             put_chunk_small: Default::default(),
@@ -80,6 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             put_root_count: Default::default(),
             get_roots_count: Default::default(),
             get_status_count: Default::default(),
+            delete_status_count: Default::default(),
+            get_deleted_count: Default::default(),
+            get_deleted_entries: Default::default(),
             list_chunks_count: Default::default(),
             list_chunks_entries: Default::default(),
             delete_chunks_count: Default::default(),
@@ -93,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = state.config.bind.parse().expect("Bad bind address");
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    info!("Server listening on {}", &state.config.bind);
+    info!("Server listening on {}", state.config.bind);
     info!("Notify started HgWiE0XJQKoFzmEzLuR9Tv0bcyWK0AR7N");
     sd_notify::notify(&[sd_notify::NotifyState::Ready]).unwrap();
 

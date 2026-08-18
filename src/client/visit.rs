@@ -71,9 +71,9 @@ fn get_chunk(
     }
     let url = format!(
         "{}/chunks/{}/{}",
-        &config.server,
+        config.server,
         hex::encode(secrets.bucket),
-        &hash
+        hash
     );
 
     let mut res = check_response(&mut || {
@@ -211,7 +211,7 @@ fn recover_entry(
         return Ok(());
     }
     if let Some(pb) = pb {
-        pb.message(&format!("{:?}: ", &ent.path));
+        pb.message(&format!("{:?}: ", ent.path));
     }
     let dpath = dest.join(
         ent.path
@@ -354,7 +354,7 @@ pub fn roots<'a: 'b, 'b>(
     client: &reqwest::blocking::Client,
     filter: Option<&'a str>,
 ) -> Result<Roots<'b>, Error> {
-    let url = format!("{}/roots/{}", &config.server, hex::encode(secrets.bucket));
+    let url = format!("{}/roots/{}", config.server, hex::encode(secrets.bucket));
     let res = check_response(&mut || {
         client
             .get(&url[..])
@@ -394,9 +394,9 @@ impl<'a> ReadContext for Context<'a> {
         for chunk in chunks.split(",") {
             let url = format!(
                 "{}/chunks/{}/{}",
-                &self.config.server,
+                self.config.server,
                 hex::encode(self.secrets.bucket),
-                &chunk
+                chunk
             );
             let res = match self
                 .client
@@ -529,7 +529,7 @@ fn partial_validate(
     info!("Fetching chunk list",);
     let url = format!(
         "{}/chunks/{}?validate=validate",
-        &config.server,
+        config.server,
         hex::encode(secrets.bucket)
     );
     let content = check_response(&mut || {
@@ -1056,7 +1056,7 @@ pub fn run_prune(
     let mut used: HashSet<String> = HashSet::new();
 
     info!("Fetching chunk list");
-    let url = format!("{}/chunks/{}", &config.server, hex::encode(secrets.bucket));
+    let url = format!("{}/chunks/{}", config.server, hex::encode(secrets.bucket));
     let content = check_response(&mut || {
         client
             .get(&url[..])
@@ -1113,7 +1113,7 @@ pub fn run_prune(
                 if !dry {
                     let url = format!(
                         "{}/roots/{}/{}",
-                        &config.server,
+                        config.server,
                         hex::encode(secrets.bucket),
                         root.id
                     );
@@ -1205,7 +1205,7 @@ pub fn run_prune(
         if let Some(pb) = &mut pb {
             pb.message(&format!("Chunk {} / {}: ", last_idx, remove.len()));
         }
-        let url = format!("{}/chunks/{}", &config.server, hex::encode(secrets.bucket));
+        let url = format!("{}/chunks/{}", config.server, hex::encode(secrets.bucket));
 
         match check_response(&mut || {
             client

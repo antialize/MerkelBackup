@@ -21,7 +21,16 @@ import subprocess
 import tempfile
 import shutil
 import os
+import sqlite3
 import threading
+
+
+def run_client_capture(args):
+    """Run a client command, echo its output, and return it for assertions."""
+    res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+    out = res.stdout.decode(errors="replace")
+    print(out.removesuffix("\n"), flush=True)
+    return out
 
 
 def main():
@@ -305,8 +314,13 @@ cache_db="%s"
         with open(e, "w") as fi:
             fi.write("test3")
 
-        # Preform backup
-        subprocess.check_call(["target/release/mbackup", "-c", client_config, "backup"])
+        # Perform backup. This is the first backup after a prune, so it must pick up the
+        # tombstone log incrementally rather than throwing the whole remote cache away.
+        out = run_client_capture(["target/release/mbackup", "-c", client_config, "backup"])
+        if "deleted chunks reported" not in out:
+            raise Exception("Backup after prune did not apply the tombstone log")
+        if "rebuilt from scratch" in out:
+            raise Exception("Backup after prune fell back to a full cache rebuild")
         r3 = os.path.join(test_dir, "r3")
 
         # And restorm from the backup
@@ -334,6 +348,38 @@ cache_db="%s"
         with open(os.path.join(r3, e[1:]), "r") as fi:
             if fi.read() != "test3":
                 raise Exception("Bad restore 12")
+
+        # With no prune in between, the next backup must not invalidate anything at all.
+        out = run_client_capture(["target/release/mbackup", "-c", client_config, "backup"])
+        if "deleted chunks reported" in out or "rebuilt from scratch" in out:
+            raise Exception("Backup invalidated the remote cache without a prune")
+
+        # A watermark the server can no longer serve (here: one from the future, as happens
+        # when the server database is reset) must fall back to a full rebuild rather than
+        # silently trusting a stale cache.
+        cache = sqlite3.connect(os.path.join(test_dir, "cache.db"))
+        cache.execute(
+            "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)", (10**9,)
+        )
+        cache.commit()
+        cache.close()
+        out = run_client_capture(["target/release/mbackup", "-c", client_config, "backup"])
+        if "rebuilt from scratch" not in out:
+            raise Exception("Unservable watermark did not trigger a cache rebuild")
+
+        subprocess.check_call(
+            [
+                "target/release/mbackup",
+                "-c",
+                client_config,
+                "--user",
+                "restore",
+                "--password",
+                "hunter2",
+                "validate",
+                "--full",
+            ]
+        )
 
         # Delete all the content
         subprocess.check_call(

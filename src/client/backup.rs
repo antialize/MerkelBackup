@@ -31,7 +31,7 @@ use merkel_backup_plugin::PluginBox;
 use pbr::ProgressBar;
 use rand::TryRng;
 use rand::rngs::SysRng;
-use rusqlite::{Connection, Statement, params};
+use rusqlite::{Connection, OptionalExtension, Statement, params};
 
 use merkel_backup_plugin::Result as PResult;
 
@@ -48,6 +48,9 @@ const BATCH_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 const PENDING_VERIFY_FLUSH_THRESHOLD: usize = 50_000;
 // Number of concurrent upload workers (each handles encryption + HTTP independently).
 const N_UPLOAD_WORKERS: usize = 4;
+// If a prune keeps deleting chunks across this many backup passes, stop re-running and warn;
+// the residual is left for the next backup rather than looping forever against a live prune.
+const MAX_CONCURRENT_PRUNE_PASSES: usize = 4;
 
 // Upload pipeline
 
@@ -200,43 +203,48 @@ struct DirEnt {
     ctime: i64,
 }
 
-struct State<'a> {
-    secrets: Secrets,
-    config: Config,
-    /// HTTP client used for non-upload requests (has_chunks, get_status, put_root, etc.)
-    client: reqwest::blocking::Client,
-    scan: bool,
-    transfer_bytes: u64,
+#[derive(Default)]
+struct PassState {
+    transfer: bool,
     progress: Option<ProgressBar<std::io::Stdout>>,
-    has_remote_stmt: Statement<'a>,
-    update_remote_stmt: Statement<'a>,
-    insert_absent_stmt: Statement<'a>,
-    get_chunks_stmt: Statement<'a>,
-    get_chunks_unsized_stmt: Statement<'a>,
-    update_chunks_stmt: Statement<'a>,
-    entries: Vec<DirEnt>,
+    transfer_bytes: u64,
     modified_files_count: u64,
     transfered_bytes: usize,
-    skipped_bytes: usize,
     conflict_bytes: usize,
-    plugin: RCowStr<'static>,
-    plugin_name: RCowStr<'static>,
+    skipped_bytes: usize,
+    entries: Vec<DirEnt>,
     plugin_entries: Vec<String>,
     pending_verify: std::collections::HashSet<String>,
+    /// Plaintext small chunks buffered on the main thread, awaiting dispatch to a worker.
+    pending_batch: Vec<(String, Vec<u8>)>,
+    /// Approximate encrypted byte count of chunks currently in pending_batch.
+    pending_batch_bytes: usize,
     /// Total non-empty files checked during the scan phase (for progress display).
     scan_files_count: u64,
     /// Files that had chunks to upload during the upload phase.
     upload_files_new: u64,
     /// Files confirmed already present on the server during the upload phase.
     upload_files_unchanged: u64,
-    /// Plaintext small chunks buffered on the main thread, awaiting dispatch to a worker.
-    pending_batch: Vec<(String, Vec<u8>)>,
-    /// Approximate encrypted byte count of chunks currently in pending_batch.
-    pending_batch_bytes: usize,
+}
+
+struct State<'a> {
+    secrets: Secrets,
+    config: Config,
+    /// HTTP client used for non-upload requests (has_chunks, get_status, put_root, etc.)
+    client: reqwest::blocking::Client,
+    has_remote_stmt: Statement<'a>,
+    update_remote_stmt: Statement<'a>,
+    insert_absent_stmt: Statement<'a>,
+    get_chunks_stmt: Statement<'a>,
+    get_chunks_unsized_stmt: Statement<'a>,
+    update_chunks_stmt: Statement<'a>,
+    plugin: RCowStr<'static>,
+    plugin_name: RCowStr<'static>,
     /// Send side of the upload pipeline (to the worker pool).
     upload_tx: crossbeam_channel::Sender<UploadTask>,
     /// Receive side of the upload pipeline (results from workers).
     upload_rx: crossbeam_channel::Receiver<UploadResult>,
+    pass: PassState,
 }
 
 #[derive(PartialEq)]
@@ -267,9 +275,9 @@ fn has_chunk(chunk: &str, state: &mut State, size: Option<usize>) -> Result<HasC
 
     let url = format!(
         "{}/chunks/{}/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket),
-        &chunk
+        chunk
     );
     let res = retry(&mut || {
         state
@@ -321,7 +329,7 @@ fn has_chunks_remote(chunks: &[&str], state: &mut State) -> Result<ChunksResult,
     debug_assert!(!chunks.is_empty());
     let url = format!(
         "{}/chunks/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket),
     );
     let body = chunks.join("\0");
@@ -431,11 +439,11 @@ impl<'a> BackupContext for State<'a> {
         if unknown.is_empty() {
             return ROk(true);
         }
-        if self.scan {
+        if !self.pass.transfer {
             for c in &unknown {
-                self.pending_verify.insert(c.to_string());
+                self.pass.pending_verify.insert(c.to_string());
             }
-            if self.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
+            if self.pass.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
                 match flush_pending_verify(self) {
                     Ok(()) => {}
                     Err(e) => return RErr(RBoxError::new(e)),
@@ -457,7 +465,8 @@ impl<'a> BackupContext for State<'a> {
     }
 
     fn add_entry(&mut self, line: RStr) -> PResult<()> {
-        self.plugin_entries
+        self.pass
+            .plugin_entries
             .push(format!("@{}\0{}\0{}", self.plugin, self.plugin_name, line));
         ROk(())
     }
@@ -474,18 +483,18 @@ impl<'a> BackupContext for State<'a> {
     }
 
     fn scan_register(&mut self, files: usize, bytes: usize) {
-        self.modified_files_count += files as u64;
-        self.transfer_bytes += bytes as u64;
+        self.pass.modified_files_count += files as u64;
+        self.pass.transfer_bytes += bytes as u64;
     }
 }
 
 /// Dispatch the current pending_batch to a worker. No-op if the batch is empty.
 fn send_pending_batch(state: &mut State) -> Result<(), Error> {
-    if state.pending_batch.is_empty() {
+    if state.pass.pending_batch.is_empty() {
         return Ok(());
     }
-    let chunks = std::mem::take(&mut state.pending_batch);
-    state.pending_batch_bytes = 0;
+    let chunks = std::mem::take(&mut state.pass.pending_batch);
+    state.pass.pending_batch_bytes = 0;
     state
         .upload_tx
         .send(UploadTask::Batch { chunks })
@@ -506,9 +515,12 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         // Handing plaintext to a worker; it will encrypt and upload.
         if content.len() < BATCH_UPLOAD_MAX {
             // Small chunk: accumulate in the pending batch on the main thread.
-            state.pending_batch.push((hash.clone(), content.to_vec()));
-            state.pending_batch_bytes += content.len() + 12;
-            if state.pending_batch_bytes >= BATCH_FLUSH_BYTES {
+            state
+                .pass
+                .pending_batch
+                .push((hash.clone(), content.to_vec()));
+            state.pass.pending_batch_bytes += content.len() + 12;
+            if state.pass.pending_batch_bytes >= BATCH_FLUSH_BYTES {
                 send_pending_batch(state)?;
             }
         } else {
@@ -524,7 +536,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
         // Non-blocking drain to keep the result channel from backing up.
         drain_results(state)?
     } else {
-        state.skipped_bytes += content.len();
+        state.pass.skipped_bytes += content.len();
 
         // The chunk was already present on the server; no upload task is enqueued,
         // so we must handle progress and cache updates here directly.
@@ -536,7 +548,7 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
 
         // Advance the upload progress bar for skipped chunks so it reflects all
         // bytes processed, not just bytes that were actually transferred.
-        if let Some(p) = &mut state.progress {
+        if let Some(p) = &mut state.pass.progress {
             p.add(content.len() as u64);
         }
     }
@@ -557,16 +569,16 @@ fn push_chunk(content: &[u8], state: &mut State) -> Result<String, Error> {
 fn process_upload_result(state: &mut State, result: UploadResult) -> Result<(), Error> {
     match result {
         UploadResult::Uploaded { hash, transferred } => {
-            state.transfered_bytes += transferred;
+            state.pass.transfered_bytes += transferred;
             state.update_remote_stmt.execute(params![hash])?;
-            if let Some(p) = &mut state.progress {
+            if let Some(p) = &mut state.pass.progress {
                 p.add(transferred as u64);
             }
         }
         UploadResult::Conflict { hash, orig_len } => {
-            state.conflict_bytes += orig_len;
+            state.pass.conflict_bytes += orig_len;
             state.update_remote_stmt.execute(params![hash])?;
-            if let Some(p) = &mut state.progress {
+            if let Some(p) = &mut state.pass.progress {
                 p.add(orig_len as u64);
             }
         }
@@ -574,10 +586,10 @@ fn process_upload_result(state: &mut State, result: UploadResult) -> Result<(), 
             hashes,
             total_transferred,
         } => {
-            state.transfered_bytes += total_transferred;
+            state.pass.transfered_bytes += total_transferred;
             for (hash, orig_len) in &hashes {
                 state.update_remote_stmt.execute(params![hash])?;
-                if let Some(p) = &mut state.progress {
+                if let Some(p) = &mut state.pass.progress {
                     p.add(*orig_len as u64);
                 }
             }
@@ -605,7 +617,7 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     let path_str = path
         .to_str()
         .ok_or_else(|| Error::BadPath(path.to_path_buf()))?;
-    if let Some(p) = &mut state.progress {
+    if let Some(p) = &mut state.pass.progress {
         let mut start = i64::max(0, path_str.len() as i64 - 40) as usize;
         while !path_str.is_char_boundary(start) {
             start -= 1;
@@ -619,12 +631,12 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
     }
 
     // Count every non-empty file during the scan phase for periodic progress display.
-    if state.scan {
-        state.scan_files_count += 1;
-        if state.scan_files_count.is_multiple_of(10_000) {
+    if !state.pass.transfer {
+        state.pass.scan_files_count += 1;
+        if state.pass.scan_files_count.is_multiple_of(10_000) {
             info!(
                 "Scanning: {} files checked, {} to upload so far",
-                state.scan_files_count, state.modified_files_count
+                state.pass.scan_files_count, state.pass.modified_files_count
             );
         }
     }
@@ -660,11 +672,11 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
             }
             if !has_absent {
                 let good = unknown.is_empty() || {
-                    if state.scan {
+                    if !state.pass.transfer {
                         for c in &unknown {
-                            state.pending_verify.insert(c.to_string());
+                            state.pass.pending_verify.insert(c.to_string());
                         }
-                        if state.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
+                        if state.pass.pending_verify.len() >= PENDING_VERIFY_FLUSH_THRESHOLD {
                             flush_pending_verify(state)?;
                         }
                         true // optimistic during scan; verified in batch after scan completes
@@ -673,8 +685,8 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
                     }
                 };
                 if good {
-                    if !state.scan {
-                        state.upload_files_unchanged += 1;
+                    if state.pass.transfer {
+                        state.pass.upload_files_unchanged += 1;
                     }
                     return Ok(chunks);
                 }
@@ -682,14 +694,14 @@ fn backup_file(path: &Path, size: u64, mtime: u64, state: &mut State) -> Result<
         }
     }
 
-    if state.scan {
-        state.modified_files_count += 1;
-        state.transfer_bytes += size;
+    if !state.pass.transfer {
+        state.pass.modified_files_count += 1;
+        state.pass.transfer_bytes += size;
         return Ok("_".repeat((65 * (size + CHUNK_SIZE - 1) / CHUNK_SIZE - 1) as usize));
     }
 
     // Open the file and read each chunk.
-    state.upload_files_new += 1;
+    state.pass.upload_files_new += 1;
     let mut file = fs::File::open(path)?;
 
     let mut buffer = vec![0u8; u64::min(size, CHUNK_SIZE) as usize];
@@ -762,7 +774,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             if should_skip {
                 continue;
             }
-            state.entries.push(DirEnt {
+            state.pass.entries.push(DirEnt {
                 path: path_string,
                 etype: EType::Dir,
                 content: "0".to_string(),
@@ -783,7 +795,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
             let content = match backup_file(&path, md.len(), mtime, state) {
                 Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    error!("Unable to backup file {}: {:?}\n", &path_string, e);
+                    error!("Unable to backup file {}: {:?}\n", path_string, e);
                     continue;
                 }
                 Ok(v) => v,
@@ -799,7 +811,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
                 mtime: md.st_mtime(),
                 ctime: md.st_ctime(),
             };
-            state.entries.push(ent);
+            state.pass.entries.push(ent);
         } else if ft.is_symlink() {
             let link = match fs::read_link(&path) {
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -809,7 +821,7 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
                 }
                 Ok(v) => v,
             };
-            state.entries.push(DirEnt {
+            state.pass.entries.push(DirEnt {
                 path: path_string,
                 etype: EType::Link,
                 content: link
@@ -829,10 +841,68 @@ fn backup_folder(dir: &Path, state: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
-fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
+/// Read an integer from the `kvp` key/value table.
+fn get_kvp(conn: &Connection, key: &str) -> Result<Option<i64>, Error> {
+    Ok(conn
+        .query_row("SELECT value FROM kvp WHERE key = ?", params![key], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?)
+}
+
+/// Discard the remote cache and repopulate it from the full server chunk list.
+fn rebuild_remote(
+    conn: &Connection,
+    state: &mut State,
+    new_kvp_deleted_seq: Option<i64>,
+) -> Result<(), Error> {
+    let url = format!(
+        "{}/chunks/{}",
+        state.config.server,
+        hex::encode(state.secrets.bucket)
+    );
+    let content = check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .timeout(Duration::from_secs(60 * 60))
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    })?
+    .text()?;
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM remote", [])?;
+    let mut cnt = 0u64;
+    {
+        let mut stmt = tx.prepare(
+            "REPLACE INTO remote (chunk, time, present) VALUES (?, strftime('%s', 'now'), 1)",
+        )?;
+        for row in content.split('\n') {
+            if row.is_empty() {
+                continue;
+            }
+            let chunk = row.split(' ').next().ok_or(Error::Msg("Missing chunk"))?;
+            stmt.execute(params![chunk])?;
+            cnt += 1;
+        }
+    }
+    if let Some(watermark) = new_kvp_deleted_seq {
+        tx.execute(
+            "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+            params![watermark],
+        )?;
+    }
+    tx.commit()?;
+    info!("Remote cache rebuilt from scratch, {cnt} objects reloaded");
+    Ok(())
+}
+
+/// Pre-tombstone-log invalidation, kept so a new client still works against an old server.
+fn legacy_update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
     let url = format!(
         "{}/status/{}",
-        &state.config.server,
+        state.config.server,
         hex::encode(state.secrets.bucket)
     );
 
@@ -853,33 +923,213 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
         Some(t) => t < last_delete,
         None => true,
     };
-
     if !should_update_remote {
         return Ok(());
     }
-    conn.execute("DELETE FROM remote", [])?;
+    info!("Prune detected, reloading remote state (legacy server)");
+    rebuild_remote(conn, state, None)
+}
+
+/// Apply a decoded tombstone list to the remote cache.
+fn apply_tombstones(
+    conn: &Connection,
+    decoded: &crate::tombstone::Decoded,
+) -> Result<usize, Error> {
+    let mut matches: Vec<i64> = Vec::new();
+    {
+        // Perform a single full scan of the remote table, comparing each chunk's prefix against the tombstone list.
+        let mut stmt = conn.prepare("SELECT rowid, chunk FROM remote ORDER BY chunk")?;
+        let mut rows = stmt.query([])?;
+        let mut values = decoded.values.iter().peekable();
+
+        while let Some(row) = rows.next()? {
+            if values.peek().is_none() {
+                break;
+            }
+            let rowid: i64 = row.get(0)?;
+            let chunk: String = row.get(1)?;
+            let Some(prefix) = crate::tombstone::prefix_of_hex(&chunk, decoded.prefix_bits) else {
+                continue;
+            };
+            while let Some(&next_prefix) = values.peek()
+                && *next_prefix < prefix
+            {
+                values.next();
+            }
+            // Do not consume the entry: several cached chunks can share a truncated prefix.
+            if let Some(&next_prefix) = values.peek()
+                && *next_prefix == prefix
+            {
+                matches.push(rowid);
+            }
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE remote SET present = 0, time = strftime('%s', 'now') WHERE rowid = ?",
+        )?;
+        for rowid in &matches {
+            stmt.execute(params![rowid])?;
+        }
+    }
+    tx.execute(
+        "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+        params![decoded.last_id],
+    )?;
+    tx.commit()?;
+    Ok(matches.len())
+}
+
+/// Fetch just the latest tombstone sequence number, or `None` if the server predates the
+/// tombstone log. Used to detect whether a prune deleted anything while a backup ran.
+fn fetch_delete_latest(state: &mut State) -> Result<Option<i64>, Error> {
     let url = format!(
-        "{}/chunks/{}",
-        &state.config.server,
+        "{}/delete-status/{}",
+        state.config.server,
         hex::encode(state.secrets.bucket)
     );
-    let content = check_response(&mut || {
+    let status = match check_response(&mut || {
         state
             .client
             .get(&url[..])
             .basic_auth(&state.config.user, Some(&state.config.password))
             .send()
-    })?
-    .text()?;
-    let mut cnt = 0;
-    for row in content.split('\n') {
-        let mut row = row.split(' ');
-        let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
-        state.update_remote_stmt.execute(params![chunk])?;
-        cnt += 1;
+    }) {
+        Ok(res) => res.text()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let latest: i64 = status
+        .split_whitespace()
+        .next()
+        .ok_or(Error::Msg("Missing latest"))?
+        .parse()?;
+    Ok(Some(latest))
+}
+
+/// Result of bringing the remote cache up to date.
+struct RemoteUpdate {
+    /// The tombstone sequence the cache is now valid for, or `None` against a legacy server.
+    synced: Option<i64>,
+    /// Number of cache entries this call invalidated (set `present = 0`). On a re-run this being
+    /// zero means the concurrent prune did not touch any chunk we hold. `usize::MAX` when a full
+    /// rebuild happened and the count is not meaningful, which forces a conservative re-scan.
+    invalidated: usize,
+}
+
+fn update_remote(conn: &Connection, state: &mut State) -> Result<RemoteUpdate, Error> {
+    let url = format!(
+        "{}/delete-status/{}",
+        state.config.server,
+        hex::encode(state.secrets.bucket)
+    );
+    let status = match check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    }) {
+        Ok(res) => res.text()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::NOT_FOUND)) => {
+            debug!("Server does not support the tombstone log, using legacy invalidation");
+            legacy_update_remote(conn, state)?;
+            return Ok(RemoteUpdate {
+                synced: None,
+                invalidated: 0,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+
+    let mut parts = status.split_whitespace();
+    let latest: i64 = parts.next().ok_or(Error::Msg("Missing latest"))?.parse()?;
+    let floor: i64 = parts.next().ok_or(Error::Msg("Missing floor"))?.parse()?;
+
+    let watermark = match get_kvp(conn, "deleted_seq")? {
+        Some(w) => w,
+        None => {
+            let empty: i64 = conn.query_row("SELECT count(*) FROM remote", [], |row| row.get(0))?;
+            if empty == 0 {
+                // Nothing cached, so there is nothing to invalidate. Adopt the current
+                // sequence number so the first real backup starts up to date.
+                conn.execute(
+                    "REPLACE INTO kvp (key, value) VALUES ('deleted_seq', ?)",
+                    params![latest],
+                )?;
+                return Ok(RemoteUpdate {
+                    synced: Some(latest),
+                    invalidated: 0,
+                });
+            }
+            info!("Remote cache predates the tombstone log, rebuilding");
+            rebuild_remote(conn, state, Some(latest))?;
+            return Ok(RemoteUpdate {
+                synced: Some(latest),
+                invalidated: usize::MAX,
+            });
+        }
+    };
+
+    if watermark == latest {
+        return Ok(RemoteUpdate {
+            synced: Some(latest),
+            invalidated: 0,
+        });
     }
-    info!("Prune detected. {cnt} objects reloaded from remote state");
-    Ok(())
+    // watermark > latest means the server database was reset behind our back.
+    if watermark < floor || watermark > latest {
+        info!(
+            "Remote cache is too far behind ({watermark} outside {floor}..={latest}), rebuilding"
+        );
+        rebuild_remote(conn, state, Some(latest))?;
+        return Ok(RemoteUpdate {
+            synced: Some(latest),
+            invalidated: usize::MAX,
+        });
+    }
+
+    let url = format!(
+        "{}/deleted/{}?since={}",
+        state.config.server,
+        hex::encode(state.secrets.bucket),
+        watermark
+    );
+    let body = match check_response(&mut || {
+        state
+            .client
+            .get(&url[..])
+            .timeout(Duration::from_secs(200 * 60))
+            .basic_auth(&state.config.user, Some(&state.config.password))
+            .send()
+    }) {
+        Ok(res) => res.bytes()?,
+        Err(Error::HttpStatus(reqwest::StatusCode::GONE)) => {
+            info!("Server no longer retains tombstones from {watermark}, rebuilding");
+            rebuild_remote(conn, state, Some(latest))?;
+            return Ok(RemoteUpdate {
+                synced: Some(latest),
+                invalidated: usize::MAX,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+
+    let decoded = crate::tombstone::decode(&body).map_err(Error::Tombstone)?;
+    let marked = apply_tombstones(conn, &decoded)?;
+    info!(
+        "Prune detected. {} deleted chunks reported, {} cached entries invalidated, sequence {} -> {}",
+        decoded.values.len(),
+        marked,
+        watermark,
+        decoded.last_id
+    );
+    Ok(RemoteUpdate {
+        synced: Some(decoded.last_id),
+        invalidated: marked,
+    })
 }
 
 /// Batch-verify the chunk hashes currently accumulated in `pending_verify`
@@ -889,7 +1139,7 @@ fn update_remote(conn: &Connection, state: &mut State) -> Result<(), Error> {
 /// queued hashes in batches of up to 900 per POST, after which `has_chunk()`
 /// can check chunk existence using only the local DB.
 fn flush_pending_verify(state: &mut State) -> Result<(), Error> {
-    let chunks: Vec<String> = state.pending_verify.drain().collect();
+    let chunks: Vec<String> = state.pass.pending_verify.drain().collect();
     if chunks.is_empty() {
         return Ok(());
     }
@@ -936,6 +1186,12 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
     let conn = Connection::open(&config.cache_db)?;
 
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Increase the cache size to 1GB (negative value means KB, so -1024*1024 = -1GB).
+    conn.pragma_update(None, "cache_size", -1024 * 1024)?;
+    conn.pragma_update(None, "mmap_size", 2i64 * 1024 * 1024 * 1024)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.busy_timeout(Duration::from_secs(30))?;
 
     // Note that UNIQUE constraints automatically create indexes
     // (according to experimentation).
@@ -975,6 +1231,16 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         [],
     )?;
 
+    // Bookkeeping for the remote cache, currently just 'deleted_seq': the tombstone sequence
+    // number the cache has been brought up to date with.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS kvp (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Check if the server changed since last backup, if so clear the remote cache
     match conn.query_one("SELECT server FROM remote_server", [], |row| {
         row.get::<_, String>(0)
@@ -982,6 +1248,7 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
         Ok(v) if v != config.server => {
             error!("Remote server changed, clearing remote cache");
             conn.execute("DELETE FROM remote", [])?;
+            conn.execute("DELETE FROM kvp", [])?;
             conn.execute("DELETE FROM remote_server", [])?;
             conn.execute(
                 "INSERT INTO remote_server (server) VALUES (?)",
@@ -1008,9 +1275,6 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
             .no_deflate()
             .no_gzip()
             .build()?,
-        scan: true,
-        transfer_bytes: 0,
-        progress: None,
         has_remote_stmt: conn.prepare("SELECT present FROM remote WHERE chunk = ?")?,
         update_remote_stmt: conn.prepare(
             "REPLACE INTO remote (chunk, time, present) VALUES (?, strftime('%s', 'now'), 1)",
@@ -1024,20 +1288,8 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
             .prepare("SELECT chunks, size FROM files WHERE path = ? AND mtime = ?")?,
         update_chunks_stmt: conn
             .prepare("REPLACE INTO files (path, size, mtime, chunks) VALUES (?, ?, ?, ?)")?,
-        entries: Vec::new(),
-        modified_files_count: 0,
-        transfered_bytes: 0,
-        conflict_bytes: 0,
-        skipped_bytes: 0,
-        plugin_entries: Vec::new(),
         plugin: RCowStr::from_str(""),
         plugin_name: RCowStr::from_str(""),
-        pending_verify: std::collections::HashSet::new(),
-        scan_files_count: 0,
-        upload_files_new: 0,
-        upload_files_unchanged: 0,
-        pending_batch: Vec::new(),
-        pending_batch_bytes: 0,
         upload_tx: {
             // Placeholder; replaced below after workers are spawned.
             let (tx, _) = crossbeam_channel::bounded(0);
@@ -1047,181 +1299,234 @@ pub fn run(config: Config, secrets: Secrets, plugins: &mut [PluginBox]) -> Resul
             let (_, rx) = crossbeam_channel::bounded(0);
             rx
         },
+        pass: Default::default(),
     };
 
-    // Spawn upload worker pool with a shared task receiver.
-    {
-        let (task_tx, task_rx) = crossbeam_channel::bounded::<UploadTask>(N_UPLOAD_WORKERS * 2);
-        let (result_tx, result_rx) =
-            crossbeam_channel::bounded::<UploadResult>(N_UPLOAD_WORKERS * 16);
-        let key = state.secrets.key;
-        let server = state.config.server.clone();
-        let bucket_hex = hex::encode(state.secrets.bucket);
-        let user = state.config.user.clone();
-        let password = state.config.password.clone();
-        for _ in 0..N_UPLOAD_WORKERS {
-            let task_rx = task_rx.clone();
-            let result_tx = result_tx.clone();
-            let server = server.clone();
-            let bucket_hex = bucket_hex.clone();
-            let user = user.clone();
-            let password = password.clone();
-            std::thread::spawn(move || {
-                upload_worker(key, server, bucket_hex, user, password, task_rx, result_tx);
+    let dirs = state.config.backup_dirs.clone();
+    let mut pass: usize = 0;
+    loop {
+        // Reset the per-pass accumulators. A no-op on the first pass; on a re-run after a
+        // concurrent prune it clears the previous pass so the scan/upload can run again.
+        // state.scan = true;
+        // state.progress = None;
+        // state.transfer_bytes = 0;
+        // state.modified_files_count = 0;
+        // state.transfered_bytes = 0;
+        // state.conflict_bytes = 0;
+        // state.skipped_bytes = 0;
+        // state.entries.clear();
+        // state.plugin_entries.clear();
+        // state.pending_verify.clear();
+        // state.pending_batch.clear();
+        // state.pending_batch_bytes = 0;
+        // state.scan_files_count = 0;
+        // state.upload_files_new = 0;
+        // state.upload_files_unchanged = 0;
+        state.pass = Default::default();
+
+        let update = update_remote(&conn, &mut state)?;
+        if pass > 0 && update.invalidated == 0 {
+            // The prune that triggered this re-run deleted nothing this client holds, so the
+            // root stored on the previous pass already references only live chunks.
+            info!("Concurrent prune did not affect this backup; keeping the previous root");
+            break;
+        }
+
+        // Spawn upload worker pool with a shared task receiver.
+        {
+            let (task_tx, task_rx) = crossbeam_channel::bounded::<UploadTask>(N_UPLOAD_WORKERS * 2);
+            let (result_tx, result_rx) =
+                crossbeam_channel::bounded::<UploadResult>(N_UPLOAD_WORKERS * 16);
+            let key = state.secrets.key;
+            let server = state.config.server.clone();
+            let bucket_hex = hex::encode(state.secrets.bucket);
+            let user = state.config.user.clone();
+            let password = state.config.password.clone();
+            for _ in 0..N_UPLOAD_WORKERS {
+                let task_rx = task_rx.clone();
+                let result_tx = result_tx.clone();
+                let server = server.clone();
+                let bucket_hex = bucket_hex.clone();
+                let user = user.clone();
+                let password = password.clone();
+                std::thread::spawn(move || {
+                    upload_worker(key, server, bucket_hex, user, password, task_rx, result_tx);
+                });
+            }
+            state.upload_tx = task_tx;
+            state.upload_rx = result_rx;
+        }
+
+        for dir in dirs.iter() {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                info!("Skipping {}", dir);
+                continue;
+            }
+            info!("Scanning {}", dir);
+            backup_folder(path, &mut state)?;
+        }
+
+        for plugin in plugins.iter_mut() {
+            info!("Scanning plugin {}: {}", plugin.plugin(), plugin.name());
+            state.plugin = plugin.plugin();
+            state.plugin_name = plugin.name();
+            let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+            plugin.scan(state).into_result().map_err(Error::Plugin)?;
+        }
+
+        if state.config.verbosity >= Level::Info {
+            state.pass.progress = Some({
+                let mut p = ProgressBar::new(state.pass.transfer_bytes);
+                p.set_max_refresh_rate(Some(Duration::from_millis(500)));
+                p.set_units(pbr::Units::Bytes);
+                p.set_width(Some(140));
+                p.show_speed = true;
+                p
             });
         }
-        state.upload_tx = task_tx;
-        state.upload_rx = result_rx;
-    }
 
-    update_remote(&conn, &mut state)?;
-
-    let dirs = state.config.backup_dirs.clone();
-    for dir in dirs.iter() {
-        let path = Path::new(dir);
-        if !path.is_dir() {
-            info!("Skipping {}", &dir);
-            continue;
-        }
-        info!("Scanning {}", &dir);
-        backup_folder(path, &mut state)?;
-    }
-
-    for plugin in plugins.iter_mut() {
-        info!("Scanning plugin {}: {}", plugin.plugin(), plugin.name());
-        state.plugin = plugin.plugin();
-        state.plugin_name = plugin.name();
-        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
-        plugin.scan(state).into_result().map_err(Error::Plugin)?;
-    }
-
-    if state.config.verbosity >= Level::Info {
-        state.progress = Some({
-            let mut p = ProgressBar::new(state.transfer_bytes);
-            p.set_max_refresh_rate(Some(Duration::from_millis(500)));
-            p.set_units(pbr::Units::Bytes);
-            p.set_width(Some(140));
-            p.show_speed = true;
-            p
-        });
-    }
-
-    let t2 = SystemTime::now();
-    info!(
-        "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
-        t2.duration_since(t1),
-        state.modified_files_count,
-        state.transfer_bytes
-    );
-
-    state.entries.clear();
-    state.plugin_entries.clear();
-    flush_pending_verify(&mut state)?;
-    state.scan = false;
-    for dir in dirs.iter() {
-        let path = Path::new(dir);
-        if !path.is_dir() {
-            info!("Skipping {}", &dir);
-            continue;
-        }
-        info!("Backing up {}", &dir);
-        let before_new = state.upload_files_new;
-        let before_unchanged = state.upload_files_unchanged;
-
-        let md = fs::metadata(path)?;
-        state.entries.push(DirEnt {
-            path: dir.to_string(),
-            etype: EType::Dir,
-            content: "0".to_string(),
-            size: 0,
-            mode: md.st_mode() & 0xFFF,
-            uid: md.st_uid(),
-            gid: md.st_gid(),
-            mtime: md.st_mtime(),
-            ctime: md.st_ctime(),
-        });
-        backup_folder(path, &mut state)?;
+        let t2 = SystemTime::now();
         info!(
-            "Finished {}: {} new files, {} unchanged files",
-            dir,
-            state.upload_files_new - before_new,
-            state.upload_files_unchanged - before_unchanged
+            "Scan complete after {:?}, {} modified files, {} bytes to transfer\n",
+            t2.duration_since(t1),
+            state.pass.modified_files_count,
+            state.pass.transfer_bytes
         );
-    }
 
-    for plugin in plugins.iter_mut() {
-        info!("Backing up plugin {}: {}", plugin.plugin(), plugin.name());
-        state.plugin = plugin.plugin();
-        state.plugin_name = plugin.name();
-        let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
-        plugin.backup(state).into_result().map_err(Error::Plugin)?;
-    }
+        state.pass.entries.clear();
+        state.pass.plugin_entries.clear();
+        flush_pending_verify(&mut state)?;
+        state.pass.transfer = true;
+        for dir in dirs.iter() {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                info!("Skipping {}", dir);
+                continue;
+            }
+            info!("Backing up {}", dir);
+            let before_new = state.pass.upload_files_new;
+            let before_unchanged = state.pass.upload_files_unchanged;
 
-    let t3 = SystemTime::now();
-    info!(
-        "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
-        t3.duration_since(t2),
-        state.transfered_bytes,
-        state.conflict_bytes,
-        state.skipped_bytes
-    );
-
-    info!("Storing root");
-
-    let mut ans = "".to_string();
-    for ent in state.entries.iter() {
-        if !ans.is_empty() {
-            ans.push('\0');
-            ans.push('\0');
+            let md = fs::metadata(path)?;
+            state.pass.entries.push(DirEnt {
+                path: dir.to_string(),
+                etype: EType::Dir,
+                content: "0".to_string(),
+                size: 0,
+                mode: md.st_mode() & 0xFFF,
+                uid: md.st_uid(),
+                gid: md.st_gid(),
+                mtime: md.st_mtime(),
+                ctime: md.st_ctime(),
+            });
+            backup_folder(path, &mut state)?;
+            info!(
+                "Finished {}: {} new files, {} unchanged files",
+                dir,
+                state.pass.upload_files_new - before_new,
+                state.pass.upload_files_unchanged - before_unchanged
+            );
         }
-        ans.push_str(&format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            ent.path,
-            ent.etype,
-            ent.size,
-            ent.content,
-            ent.mode,
-            ent.uid,
-            ent.gid,
-            ent.mtime,
-            ent.ctime,
+
+        for plugin in plugins.iter_mut() {
+            info!("Backing up plugin {}: {}", plugin.plugin(), plugin.name());
+            state.plugin = plugin.plugin();
+            state.plugin_name = plugin.name();
+            let state = BackupContextRef::from_ptr(&mut state, TD_Opaque);
+            plugin.backup(state).into_result().map_err(Error::Plugin)?;
+        }
+
+        let t3 = SystemTime::now();
+        info!(
+            "Backup complete after {:?}, {} bytes transfered, {} bytes conflict, {} bytes skipped\n",
+            t3.duration_since(t2),
+            state.pass.transfered_bytes,
+            state.pass.conflict_bytes,
+            state.pass.skipped_bytes
+        );
+
+        info!("Storing root");
+
+        let mut ans = "".to_string();
+        for ent in state.pass.entries.iter() {
+            if !ans.is_empty() {
+                ans.push('\0');
+                ans.push('\0');
+            }
+            ans.push_str(&format!(
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                ent.path,
+                ent.etype,
+                ent.size,
+                ent.content,
+                ent.mode,
+                ent.uid,
+                ent.gid,
+                ent.mtime,
+                ent.ctime,
+            ));
+        }
+        for ent in state.pass.plugin_entries.iter() {
+            if !ans.is_empty() {
+                ans.push('\0');
+                ans.push('\0');
+            }
+            ans.push_str(ent);
+        }
+
+        let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
+
+        // Flush any remaining buffered small chunks, then drop the sender so workers
+        // exit after draining the queue, and process all remaining results.
+        send_pending_batch(&mut state)?;
+        drop(std::mem::replace(
+            &mut state.upload_tx,
+            crossbeam_channel::bounded(0).0,
         ));
-    }
-    for ent in state.plugin_entries.iter() {
-        if !ans.is_empty() {
-            ans.push('\0');
-            ans.push('\0');
+        while let Ok(result) = state.upload_rx.recv() {
+            process_upload_result(&mut state, result)?;
         }
-        ans.push_str(ent);
+
+        let url = format!(
+            "{}/roots/{}/{}",
+            state.config.server,
+            hex::encode(state.secrets.bucket),
+            state.config.hostname
+        );
+
+        check_response(&mut || {
+            state
+                .client
+                .put(&url[..])
+                .basic_auth(&state.config.user, Some(&state.config.password))
+                .body(root.clone())
+                .send()
+        })?;
+
+        // If a prune deleted chunks while this pass ran, the root we just stored may reference a
+        // swept chunk. Re-run: the next update_remote pulls those tombstones, marks the chunks
+        // absent, and the re-scan re-uploads them, which repairs both the new root and this one.
+        match update.synced {
+            None => break, // legacy server: no tombstone counter to compare against
+            Some(synced) => match fetch_delete_latest(&mut state)? {
+                Some(latest_now) if latest_now != synced => {
+                    pass += 1;
+                    if pass >= MAX_CONCURRENT_PRUNE_PASSES {
+                        error!(
+                            "A prune kept deleting across {pass} backup passes; the stored root \
+                             may reference swept chunks and will be repaired by the next backup"
+                        );
+                        break;
+                    }
+                    info!(
+                        "A prune deleted chunks during the backup (sequence {synced} -> \
+                         {latest_now}); re-running to re-upload any swept chunks"
+                    );
+                }
+                _ => break,
+            },
+        }
     }
-
-    let root = push_chunk(&lzma::compress(ans.as_bytes(), 7)?, &mut state)?;
-
-    // Flush any remaining buffered small chunks, then drop the sender so workers
-    // exit after draining the queue, and process all remaining results.
-    send_pending_batch(&mut state)?;
-    drop(std::mem::replace(
-        &mut state.upload_tx,
-        crossbeam_channel::bounded(0).0,
-    ));
-    while let Ok(result) = state.upload_rx.recv() {
-        process_upload_result(&mut state, result)?;
-    }
-
-    let url = format!(
-        "{}/roots/{}/{}",
-        &state.config.server,
-        hex::encode(state.secrets.bucket),
-        &state.config.hostname
-    );
-
-    check_response(&mut || {
-        state
-            .client
-            .put(&url[..])
-            .basic_auth(&state.config.user, Some(&state.config.password))
-            .body(root.clone())
-            .send()
-    })?;
     Ok(())
 }

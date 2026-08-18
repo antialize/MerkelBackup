@@ -160,6 +160,8 @@ pub enum Error {
     OsRandom(#[from] SysError),
     #[error("plugin {0}")]
     Plugin(RBoxError),
+    #[error("tombstone {0}")]
+    Tombstone(#[from] crate::tombstone::TombstoneError),
 }
 
 pub fn retry<F>(f: &mut F) -> Result<reqwest::blocking::Response, reqwest::Error>
