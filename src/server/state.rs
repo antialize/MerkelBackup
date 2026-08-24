@@ -281,6 +281,14 @@ pub fn setup_db(conf: &Config) -> Connection {
     )
     .expect("Unable to create deleted_floor table");
 
+    // Flush any pending WAL frames (in particular the migration's large chunks rewrite
+    // above, which can leave a multi-GB WAL) into the main database file before the
+    // read-only connection pool is opened, so those connections start from a fully
+    // checkpointed, stable file rather than racing a huge outstanding checkpoint.
+    if let Err(e) = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
+        warn!("Unable to checkpoint WAL after setup: {e}");
+    }
+
     conn
 }
 
