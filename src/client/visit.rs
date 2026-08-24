@@ -136,6 +136,133 @@ fn chunk_hash_bytes(chunk: &str) -> Option<[u8; 32]> {
     Some(buf)
 }
 
+/// Reads decompressed bytes from `reader` and invokes `on_row` for each
+/// two-NUL delimited record, one at a time, without holding the whole
+/// (potentially multi-gigabyte) decompressed text in memory at once. Returns
+/// the underlying reader once decompression is complete, so the caller can
+/// keep draining/using it if needed (e.g. to finish an integrity check).
+fn stream_rows<R: Read>(reader: R, mut on_row: impl FnMut(&str)) -> Result<R, Error> {
+    let mut lzma_reader = lzma::LzmaReader::new_decompressor(reader)?;
+    let mut buf = [0u8; 256 * 1024];
+    let mut pending: Vec<u8> = Vec::new();
+
+    loop {
+        let n = lzma_reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buf[..n]);
+
+        // NUL bytes can never appear inside a multi-byte utf8 sequence (only
+        // as the single-byte NUL codepoint itself), so searching for the
+        // two-NUL record separator at the byte level is safe regardless of
+        // where a chunk boundary falls.
+        while let Some(sep) = pending.windows(2).position(|w| w == [0, 0]) {
+            let row = std::str::from_utf8(&pending[..sep])
+                .map_err(|_| Error::Msg("Root listing is not valid utf8"))?;
+            on_row(row);
+            pending.drain(0..sep + 2);
+        }
+    }
+
+    if !pending.is_empty() {
+        let row = std::str::from_utf8(&pending)
+            .map_err(|_| Error::Msg("Root listing is not valid utf8"))?;
+        on_row(row);
+    }
+    Ok(lzma_reader.into_inner())
+}
+
+/// `Read` adapter that decrypts (chacha20) and hashes (blake2b, seeded with
+/// `secrets.seed`) bytes as they're read from `inner`, without buffering
+/// anything beyond what the caller reads.
+struct DecryptingReader<R> {
+    inner: R,
+    cipher: chacha20::ChaCha20,
+    hasher: blake2::Blake2b<digest::consts::U32>,
+}
+
+impl<R: Read> Read for DecryptingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.cipher.apply_keystream(&mut buf[..n]);
+            self.hasher.update(&buf[..n]);
+        }
+        Ok(n)
+    }
+}
+
+/// Like `get_root`, but streams the network download, decryption and
+/// decompression together instead of doing them one after another with a
+/// fully buffered intermediate result. `on_row` is called for each row as
+/// it's decompressed.
+///
+/// The integrity check is unavoidably a *trailing* check here: with
+/// `get_chunk`, we verify the blake2b hash before looking at any of the
+/// content, so a corrupt/tampered chunk is never acted on. Here, `on_row`
+/// necessarily sees rows before we've finished hashing everything and can
+/// compare against `hash`. That's fine for how `run_prune` uses this: the
+/// only thing it does in `on_row` is mark chunks as "used" (never as safe to
+/// delete), so at worst a corrupt root makes us keep a few chunks we didn't
+/// need to - it can never cause us to delete something we shouldn't. If the
+/// final integrity check fails, we still return an error, exactly like
+/// `get_chunk`/`get_root` do; the caller just can't "undo" whatever `on_row`
+/// already did with the unverified rows.
+fn stream_root(
+    client: &mut reqwest::blocking::Client,
+    config: &Config,
+    secrets: &Secrets,
+    hash: &str,
+    on_row: impl FnMut(&str),
+) -> Result<(), Error> {
+    let url = format!(
+        "{}/chunks/{}/{}",
+        config.server,
+        hex::encode(secrets.bucket),
+        hash
+    );
+    let mut res = check_response(&mut || {
+        client
+            .get(&url[..])
+            .timeout(Duration::from_secs(10 * 60))
+            .basic_auth(&config.user, Some(&config.password))
+            .send()
+    })?;
+
+    let mut nonce = [0u8; 12];
+    res.read_exact(&mut nonce)?;
+
+    let mut hasher = blake2::Blake2b::<digest::consts::U32>::new();
+    hasher.update(secrets.seed);
+    let decrypting = DecryptingReader {
+        inner: res,
+        cipher: chacha20::ChaCha20::new(&secrets.key.into(), &nonce.into()),
+        hasher,
+    };
+
+    let mut decrypting = stream_rows(decrypting, on_row)?;
+
+    // `LzmaReader` can decide it has reached the end of the compressed
+    // stream before the underlying response body is fully drained (e.g. if
+    // there were any trailing bytes after the logical end of the lzma
+    // stream). Pull every remaining byte through so the hash below covers
+    // the *entire* stored blob, exactly like `get_chunk` does, not just
+    // whatever prefix the decompressor happened to consume.
+    let mut drain_buf = [0u8; 64 * 1024];
+    loop {
+        let n = decrypting.read(&mut drain_buf)?;
+        if n == 0 {
+            break;
+        }
+    }
+
+    if hex::encode(decrypting.hasher.finalize()) != hash {
+        return Err(Error::InvalidHash());
+    }
+    Ok(())
+}
+
 struct Ent {
     etype: EType,
     path: std::path::PathBuf,
@@ -1068,7 +1195,7 @@ pub fn run_prune(
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    let client = reqwest::blocking::Client::new();
+    let mut client = reqwest::blocking::Client::new();
 
     // Chunk hashes are 32-byte blake2b digests, hex encoded. Decoding them
     // once into a fixed size, `Copy` byte array lets the set store them
@@ -1088,98 +1215,138 @@ pub fn run_prune(
     })?
     .text()?;
 
+    // Deciding which roots to keep/remove has to stay sequential: the
+    // exponential retention policy depends on visiting each host's roots in
+    // increasing time order and remembering the last *kept* root's time.
+    // This pass is cheap (no root bodies are fetched here), so it isn't
+    // worth parallelizing.
+    let root_list = roots(&config, &secrets, &client, None)?;
     let mut last_host_root_time = HashMap::new();
-
-    let (_, ok) = find_entries(
-        &config,
-        &secrets,
-        None,
-        plugins,
-        |root| {
-            let remove = if exponential {
-                // We visit roots in increasing time order
-                // Keep roots one for the last 12 days, the last 12 weeks
-                // the last 12 months, and every half year for each host
-                let keep = if let Some(lt) = last_host_root_time.get(root.host) {
-                    const GRACE: i64 = 60 * 60 * 12;
-                    if root.time + 60 * 60 * 24 * 12 >= now {
-                        // Keep all roots less than 12 dayes old
-                        true
-                    } else if root.time + 60 * 60 * 24 * 7 * 12 >= now {
-                        root.time >= lt + 60 * 60 * 24 * 7 - GRACE
-                    } else if root.time + 60 * 60 * 24 * 366 >= now {
-                        root.time >= lt + 60 * 60 * 24 * 31 - GRACE
-                    } else {
-                        root.time >= lt + 60 * 60 * 24 * 182 - GRACE
-                    }
-                } else {
-                    // Keep the first root for the host
+    let mut kept_roots = Vec::new();
+    let mut ok = true;
+    for root in root_list.iter() {
+        let root = root?;
+        let remove = if exponential {
+            // We visit roots in increasing time order
+            // Keep roots one for the last 12 days, the last 12 weeks
+            // the last 12 months, and every half year for each host
+            let keep = if let Some(lt) = last_host_root_time.get(root.host) {
+                const GRACE: i64 = 60 * 60 * 12;
+                if root.time + 60 * 60 * 24 * 12 >= now {
+                    // Keep all roots less than 12 dayes old
                     true
-                };
-                if keep {
-                    last_host_root_time.insert(root.host.to_string(), root.time);
+                } else if root.time + 60 * 60 * 24 * 7 * 12 >= now {
+                    root.time >= lt + 60 * 60 * 24 * 7 - GRACE
+                } else if root.time + 60 * 60 * 24 * 366 >= now {
+                    root.time >= lt + 60 * 60 * 24 * 31 - GRACE
+                } else {
+                    root.time >= lt + 60 * 60 * 24 * 182 - GRACE
                 }
-                !keep
-            } else if let Some(age) = age {
-                root.time + 60 * 60 * 24 * i64::from(age) <= now
             } else {
-                false
+                // Keep the first root for the host
+                true
             };
+            if keep {
+                last_host_root_time.insert(root.host.to_string(), root.time);
+            }
+            !keep
+        } else if let Some(age) = age {
+            root.time + 60 * 60 * 24 * i64::from(age) <= now
+        } else {
+            false
+        };
 
-            if remove {
-                info!(
-                    "Removing root {} {}",
-                    root.host,
-                    DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+        if remove {
+            info!(
+                "Removing root {} {}",
+                root.host,
+                DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+            );
+            if !dry {
+                let url = format!(
+                    "{}/roots/{}/{}",
+                    config.server,
+                    hex::encode(secrets.bucket),
+                    root.id
                 );
-                if !dry {
-                    let url = format!(
-                        "{}/roots/{}/{}",
-                        config.server,
-                        hex::encode(secrets.bucket),
-                        root.id
-                    );
-                    check_response(&mut || {
-                        client
-                            .delete(&url[..])
-                            .timeout(Duration::from_secs(5 * 60))
-                            .basic_auth(&config.user, Some(&config.password))
-                            .send()
-                    })?;
-                }
-                Ok(false)
-            } else {
-                Ok(true)
+                check_response(&mut || {
+                    client
+                        .delete(&url[..])
+                        .timeout(Duration::from_secs(5 * 60))
+                        .basic_auth(&config.user, Some(&config.password))
+                        .send()
+                })?;
             }
-        },
-        |ent| match ent {
-            ParsedEntry::None => {}
-            ParsedEntry::Normal(ent) => {
-                if ent.etype == EType::Link || ent.etype == EType::Dir {
-                    return;
-                }
-                for chunk in &ent.chunks {
-                    if let Some(hash) = chunk_hash_bytes(chunk) {
-                        used.insert(hash);
+        } else {
+            kept_roots.push(root);
+        }
+    }
+
+    // Fetching + decompressing the kept roots is where almost all the time
+    // goes (network transfer of a compressed root listing plus CPU bound
+    // lzma decompression of what can be gigabytes of text). We tried
+    // parallelizing this across worker threads, but that multiplies peak
+    // memory by the number of threads (each holding a full decompressed
+    // root), which is what caused an OOM kill in practice. Streaming the
+    // download, decryption and decompression together (see `stream_root`)
+    // keeps memory bounded per root regardless of its size, and lets the
+    // network transfer and CPU-bound decompression/parsing overlap, so we
+    // go back to visiting roots one at a time.
+    for root in &kept_roots {
+        info!(
+            "Visiting root {} {}",
+            root.host,
+            DateTime::from_timestamp(root.time, 0).ok_or(Error::Msg("Invalid time"))?
+        );
+
+        // Mirrors what the old sequential visitor did by feeding a synthetic
+        // `EType::Root` entry through `handle_entry`: the root listing's own
+        // chunk must be marked used too, or it would get pruned.
+        if let Some(hash) = chunk_hash_bytes(root.hash) {
+            used.insert(hash);
+        }
+
+        let result = stream_root(&mut client, &config, &secrets, root.hash, |row| {
+            if row.is_empty() {
+                return;
+            }
+            match parse_entry(row, plugins) {
+                Ok(ParsedEntry::None) => {}
+                Ok(ParsedEntry::Normal(ent)) => {
+                    if ent.etype == EType::Link || ent.etype == EType::Dir {
+                        return;
                     }
-                }
-            }
-            ParsedEntry::Plugin { plugin, line, .. } => {
-                match plugin.parse_ent(line.into()).map_err(Error::Plugin) {
-                    ROk(v) => {
-                        for chunk in v.chunks.split(',') {
-                            if let Some(hash) = chunk_hash_bytes(chunk) {
-                                used.insert(hash);
-                            }
+                    for chunk in &ent.chunks {
+                        if let Some(hash) = chunk_hash_bytes(chunk) {
+                            used.insert(hash);
                         }
                     }
-                    RErr(e) => {
-                        error!("Error visiting plugin entry: {e:?}");
+                }
+                Ok(ParsedEntry::Plugin { plugin, line, .. }) => {
+                    match plugin.parse_ent(line.into()).map_err(Error::Plugin) {
+                        ROk(v) => {
+                            for chunk in v.chunks.split(',') {
+                                if let Some(hash) = chunk_hash_bytes(chunk) {
+                                    used.insert(hash);
+                                }
+                            }
+                        }
+                        RErr(e) => {
+                            error!("Error visiting plugin entry: {e:?}");
+                        }
                     }
                 }
+                Err(e) => {
+                    ok = false;
+                    error!("Bad row '{row}`: {e:?}");
+                }
             }
-        },
-    )?;
+        });
+        if let Err(e) = result {
+            ok = false;
+            error!("Bad root {}: {:?}", root.hash, e);
+        }
+    }
 
     let mut total = 0;
     let mut removed_size = 0;
