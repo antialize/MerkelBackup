@@ -1088,6 +1088,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rust-lzma",
+ "rustc-hash",
  "sd-notify",
  "serde",
  "subtle",

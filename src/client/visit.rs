@@ -10,6 +10,7 @@ use itertools::Itertools;
 use log::{debug, error, info};
 use merkel_backup_plugin::{ParsedEnt, PluginBox, ReadContext, ReadContextRef, Result as PResult};
 use pbr::ProgressBar;
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::io::Write;
@@ -117,6 +118,18 @@ fn get_root(
     Ok(String::from_utf8(lzma::decompress(&get_chunk(
         client, config, secrets, hash,
     )?)?)?)
+}
+
+/// Decode a hex encoded blake2b-256 chunk hash into a fixed size byte array.
+/// Returns `None` for the "empty" sentinel (used for zero-length files, which
+/// is never a real chunk stored on the server) or malformed input.
+fn chunk_hash_bytes(chunk: &str) -> Option<[u8; 32]> {
+    if chunk.len() != 64 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    hex::decode_to_slice(chunk, &mut buf).ok()?;
+    Some(buf)
 }
 
 struct Ent {
@@ -1053,7 +1066,12 @@ pub fn run_prune(
 
     let client = reqwest::blocking::Client::new();
 
-    let mut used: HashSet<String> = HashSet::new();
+    // Chunk hashes are 32-byte blake2b digests, hex encoded. Decoding them
+    // once into a fixed size, `Copy` byte array lets the set store them
+    // inline (no heap allocation per entry) and lets us use a cheap
+    // non-cryptographic hasher instead of the default SipHash, since the
+    // keys are already uniformly distributed hash output.
+    let mut used: FxHashSet<[u8; 32]> = FxHashSet::default();
 
     info!("Fetching chunk list");
     let url = format!("{}/chunks/{}", config.server, hex::encode(secrets.bucket));
@@ -1136,15 +1154,23 @@ pub fn run_prune(
                 if ent.etype == EType::Link || ent.etype == EType::Dir {
                     return;
                 }
-                for chunk in ent.chunks.iter() {
-                    used.insert(chunk.to_owned());
+                for chunk in &ent.chunks {
+                    if let Some(hash) = chunk_hash_bytes(chunk) {
+                        used.insert(hash);
+                    } else {
+                        panic!("Invalid chunk hash: {chunk}");
+                    }
                 }
             }
             ParsedEntry::Plugin { plugin, line, .. } => {
                 match plugin.parse_ent(line.into()).map_err(Error::Plugin) {
                     ROk(v) => {
                         for chunk in v.chunks.split(',') {
-                            used.insert(chunk.to_string());
+                            if let Some(hash) = chunk_hash_bytes(chunk) {
+                                used.insert(hash);
+                            } else {
+                                panic!("Invalid chunk hash: {chunk}");
+                            }
                         }
                     }
                     RErr(e) => {
@@ -1166,7 +1192,7 @@ pub fn run_prune(
         let chunk = row.next().ok_or(Error::Msg("Missing churk"))?;
         let size: u64 = row.next().ok_or(Error::Msg("Missing size"))?.parse()?;
         total += 1;
-        if used.contains(chunk) {
+        if chunk_hash_bytes(chunk).is_some_and(|hash| used.contains(&hash)) {
             continue;
         }
         removed_size += size;

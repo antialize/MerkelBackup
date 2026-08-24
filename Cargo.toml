@@ -60,3 +60,4 @@ thiserror = "2"
 subtle = "2"
 abi_stable = {version="0.11.3", default-features = false}
 merkel_backup_plugin = {path = "merkel_backup_plugin"}
+rustc-hash = "2"
