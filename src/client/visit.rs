@@ -122,13 +122,17 @@ fn get_root(
 
 /// Decode a hex encoded blake2b-256 chunk hash into a fixed size byte array.
 /// Returns `None` for the "empty" sentinel (used for zero-length files, which
-/// is never a real chunk stored on the server) or malformed input.
+/// is never a real chunk stored on the server). Panics for anything else that
+/// isn't a well formed 64 character hex hash, since that indicates corrupt
+/// data we don't want to silently ignore.
 fn chunk_hash_bytes(chunk: &str) -> Option<[u8; 32]> {
-    if chunk.len() != 64 {
+    if chunk == "empty" {
         return None;
     }
     let mut buf = [0u8; 32];
-    hex::decode_to_slice(chunk, &mut buf).ok()?;
+    if chunk.len() != 64 || hex::decode_to_slice(chunk, &mut buf).is_err() {
+        panic!("Invalid chunk hash: {chunk}");
+    }
     Some(buf)
 }
 
@@ -1157,8 +1161,6 @@ pub fn run_prune(
                 for chunk in &ent.chunks {
                     if let Some(hash) = chunk_hash_bytes(chunk) {
                         used.insert(hash);
-                    } else {
-                        panic!("Invalid chunk hash: {chunk}");
                     }
                 }
             }
@@ -1168,8 +1170,6 @@ pub fn run_prune(
                         for chunk in v.chunks.split(',') {
                             if let Some(hash) = chunk_hash_bytes(chunk) {
                                 used.insert(hash);
-                            } else {
-                                panic!("Invalid chunk hash: {chunk}");
                             }
                         }
                     }
