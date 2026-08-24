@@ -131,14 +131,36 @@ fn migrate_chunks_bucket_to_id(conn: &Connection) {
          );
          INSERT INTO chunks_new (id, bucket, hash, size, time, has_content)
              SELECT c.id, b.id, c.hash, c.size, c.time, c.has_content
-             FROM chunks c JOIN buckets b ON b.bucket = c.bucket;
-         DROP TABLE chunks;
+             FROM chunks c JOIN buckets b ON b.bucket = c.bucket;",
+    )
+    .expect("chunks bucket migration failed");
+
+    // Verify the join in the INSERT above did not silently drop any rows (e.g. due to a
+    // bucket string that failed to match) before committing, since DROP TABLE chunks below
+    // is otherwise unrecoverable. Still inside the open transaction, so this is free.
+    let old_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+        .expect("Unable to count rows in chunks before migration");
+    let new_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM chunks_new", [], |row| row.get(0))
+        .expect("Unable to count rows in chunks_new during migration");
+    if old_count != new_count {
+        conn.execute_batch("ROLLBACK;")
+            .expect("Unable to roll back failed chunks bucket migration");
+        panic!(
+            "chunks bucket migration would drop rows: {old_count} rows in chunks but only \
+             {new_count} rows joined to a bucket id; aborting without making any changes"
+        );
+    }
+
+    conn.execute_batch(
+        "DROP TABLE chunks;
          ALTER TABLE chunks_new RENAME TO chunks;
          CREATE INDEX IF NOT EXISTS idx_bucket_hash ON chunks (bucket, hash);
          COMMIT;",
     )
     .expect("chunks bucket migration failed");
-    info!("Migration of chunks.bucket complete");
+    info!("Migration of chunks.bucket complete ({old_count} rows)");
 }
 
 pub fn setup_db(conf: &Config) -> Connection {
