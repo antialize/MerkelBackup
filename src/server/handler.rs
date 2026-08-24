@@ -1531,19 +1531,24 @@ async fn handle_get_metrics(req: Request<Incoming>, state: Arc<State>) -> Respon
     let (roots_max_id, chunks_max_id, deletes_count, deleted_max_id): (i64, i64, i64, i64) = tryfut!(
         tokio::task::spawn_blocking(move || -> crate::error::Result<(i64, i64, i64, i64)> {
             let conn = pool.acquire();
-            let roots_max_id: i64 =
-                conn.query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| row.get(0))?;
-            let chunks_max_id: i64 =
-                conn.query_row("SELECT MAX(`id`) FROM chunks LIMIT 1", [], |row| row.get(0))?;
+            let roots_max_id: i64 = conn
+                .query_row("SELECT MAX(`id`) FROM roots LIMIT 1", [], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })?
+                .unwrap_or(0);
+            let chunks_max_id: i64 = conn
+                .query_row("SELECT MAX(`id`) FROM chunks LIMIT 1", [], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })?
+                .unwrap_or(0);
             // `deletes` has no id column, but it's a tiny table,
             // so use a full table scan with COUNT(*).
             let deletes_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM deletes LIMIT 1", [], |row| row.get(0))?;
             let deleted_max_id: i64 = conn
                 .query_row("SELECT MAX(`id`) FROM deleted LIMIT 1", [], |row| {
-                    row.get(0)
-                })
-                .optional()?
+                    row.get::<_, Option<i64>>(0)
+                })?
                 .unwrap_or(0);
             Ok((roots_max_id, chunks_max_id, deletes_count, deleted_max_id))
         })
